@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — Admin</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #262a33;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header p { margin: .25rem 0 0; color: #9aa2af; font-size: .9rem; }
+    main {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 1rem;
+      padding: 2rem;
+    }
+    .card {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1.25rem;
+    }
+    .card h2 { margin: 0 0 .5rem; font-size: 1rem; }
+    .card p { margin: 0; color: #9aa2af; font-size: .85rem; }
+    .badge {
+      display: inline-block;
+      margin-top: .75rem;
+      font-size: .7rem;
+      padding: .15rem .5rem;
+      border-radius: 999px;
+      background: #2a2f3a;
+      color: #9aa2af;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ProxyLLM Glacis — Interface d'administration</h1>
+    <p>Observabilité, compliance et FinOps des flux LLM</p>
+  </header>
+  <main>
+    <div class="card">
+      <h2>Règles (Policy-as-Code)</h2>
+      <p>Gestion des règles symboliques YAML/JSON.</p>
+      <span class="badge">à venir</span>
+    </div>
+    <div class="card">
+      <h2>Observabilité</h2>
+      <p>Séquences d'appels LLM selon la grille Unité.</p>
+      <span class="badge">à venir</span>
+    </div>
+    <div class="card">
+      <h2>Compliance</h2>
+      <p>Rapports EU AI Act (1-Click Compliance Report).</p>
+      <span class="badge">à venir</span>
+    </div>
+    <div class="card">
+      <h2>FinOps</h2>
+      <p>Quotas, budgets et chargeback par équipe.</p>
+      <span class="badge">à venir</span>
+    </div>
+    <div class="card">
+      <h2>Fournisseurs</h2>
+      <p>Configuration des fournisseurs LLM et fallback.</p>
+      <span class="badge">à venir</span>
+    </div>
+  </main>
+</body>
+</html>

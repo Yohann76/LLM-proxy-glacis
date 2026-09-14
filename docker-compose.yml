@@ -1,0 +1,20 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.proxy
+    container_name: proxyllm-proxy
+    ports:
+      - "${PROXY_PORT:-45321}:8080"
+    restart: unless-stopped
+
+  admin:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.admin
+    container_name: proxyllm-admin
+    depends_on:
+      - proxy
+    ports:
+      - "${ADMIN_PORT:-45322}:8081"
+    restart: unless-stopped
