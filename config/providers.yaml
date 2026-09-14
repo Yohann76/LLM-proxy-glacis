@@ -1,0 +1,15 @@
+# Configuration des fournisseurs LLM.
+# Chaque clé sous "providers" est le nom utilisé dans l'en-tête
+# X-ProxyLLM-Provider. api_key_env pointe vers la variable d'environnement
+# (définie dans .env) qui contient le vrai token du fournisseur.
+
+default_provider: openai
+
+providers:
+  openai:
+    base_url: "https://api.openai.com"
+    api_key_env: "OPENAI_API_KEY"
+
+  mistral:
+    base_url: "https://api.mistral.ai"
+    api_key_env: "MISTRAL_API_KEY"

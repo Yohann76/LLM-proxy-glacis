@@ -41,6 +41,9 @@
       background: #2a2f3a;
       color: #9aa2af;
     }
+    .badge.active { background: #1f3b2c; color: #7ee787; }
+    .card a { text-decoration: none; color: inherit; display: block; }
+    .card.linked { cursor: pointer; border-color: #3b6fe0; }
   </style>
 </head>
 <body>
@@ -73,6 +76,13 @@
       <h2>Fournisseurs</h2>
       <p>Configuration des fournisseurs LLM et fallback.</p>
       <span class="badge">à venir</span>
+    </div>
+    <div class="card linked">
+      <a href="/test.html">
+        <h2>Test API</h2>
+        <p>Envoyer une requête via le proxy et voir la réponse brute.</p>
+        <span class="badge active">actif</span>
+      </a>
     </div>
   </main>
 </body>

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — Test API</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #262a33;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header a { color: #7aa2f7; font-size: .85rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    label { font-size: .8rem; color: #9aa2af; display: block; margin-bottom: .3rem; }
+    .row { display: flex; gap: 1rem; }
+    .row > div { flex: 1; }
+    input, select, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 6px;
+      color: #e6e6e6;
+      padding: .55rem .7rem;
+      font-family: inherit;
+      font-size: .85rem;
+    }
+    textarea { font-family: ui-monospace, monospace; min-height: 140px; resize: vertical; }
+    button {
+      align-self: flex-start;
+      background: #3b6fe0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: .6rem 1.4rem;
+      font-size: .9rem;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .6; cursor: default; }
+    button:hover:not(:disabled) { background: #4c7cf0; }
+    #result {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: ui-monospace, monospace;
+      font-size: .8rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: none;
+    }
+    .meta { display: flex; gap: 1rem; margin-bottom: .6rem; font-family: system-ui, sans-serif; }
+    .meta span { padding: .15rem .5rem; border-radius: 999px; background: #2a2f3a; font-size: .75rem; }
+    .meta .ok { color: #7ee787; }
+    .meta .ko { color: #ff7b72; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Test API</h1>
+    <a href="/">&larr; retour au dashboard</a>
+  </header>
+  <main>
+    <div class="row">
+      <div>
+        <label for="provider">Fournisseur (X-ProxyLLM-Provider)</label>
+        <input id="provider" placeholder="vide = default_provider (ex: openai)" />
+      </div>
+      <div>
+        <label for="method">Méthode</label>
+        <select id="method">
+          <option>POST</option>
+          <option>GET</option>
+        </select>
+      </div>
+    </div>
+    <div>
+      <label for="path">Chemin</label>
+      <input id="path" value="/v1/chat/completions" />
+    </div>
+    <div>
+      <label for="apiKey">Clé API (facultatif — surcharge celle de .env pour cet appel)</label>
+      <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+      <p style="margin:.35rem 0 0;font-size:.72rem;color:#ff9d7a;">
+        ⚠️ Cette page est servie en HTTP (pas HTTPS) sur une IP publique : la clé transite en clair sur le réseau. À réserver aux clés de test / jetables.
+      </p>
+    </div>
+    <div>
+      <label for="body">Corps de la requête (JSON)</label>
+      <textarea id="body">{
+  "model": "gpt-4.1-nano",
+  "messages": [{ "role": "user", "content": "Dis bonjour en une phrase." }]
+}</textarea>
+    </div>
+    <button id="send">Envoyer via le proxy</button>
+
+    <div id="result"></div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    $('send').addEventListener('click', async () => {
+      const btn = $('send');
+      const result = $('result');
+      btn.disabled = true;
+      btn.textContent = 'Envoi…';
+      result.style.display = 'none';
+
+      const payload = {
+        provider: $('provider').value.trim(),
+        method: $('method').value,
+        path: $('path').value.trim() || '/v1/chat/completions',
+        body: $('method').value === 'GET' ? null : $('body').value,
+        api_key: $('apiKey').value.trim(),
+      };
+
+      try {
+        const res = await fetch('/api/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        let pretty = data.body;
+        try { pretty = JSON.stringify(JSON.parse(data.body), null, 2); } catch (_) {}
+
+        result.innerHTML = '';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const statusClass = data.status >= 200 && data.status < 300 ? 'ok' : 'ko';
+        meta.innerHTML = `<span class="${statusClass}">HTTP ${data.status}</span><span>${data.latency_ms} ms</span>`;
+        result.appendChild(meta);
+        result.appendChild(document.createTextNode(pretty));
+        result.style.display = 'block';
+      } catch (e) {
+        result.textContent = 'Erreur réseau : ' + e;
+        result.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Envoyer via le proxy';
+      }
+    });
+  </script>
+</body>
+</html>

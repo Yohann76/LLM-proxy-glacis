@@ -15,9 +15,14 @@ Suivi de l'avancement par étape. Coché = fait, décoché = à faire.
 
 ## Étape 1 — Passthrough proxy compatible OpenAI API
 
-- [ ] Endpoint `/v1/chat/completions` (et équivalents) en drop-in replacement
-- [ ] Configuration des fournisseurs LLM + tokens côté proxy (fichier de config)
-- [ ] Transfert de la requête au fournisseur configuré et relai de la réponse
+- [x] Endpoint générique `/v1/*` (chat/completions et tout autre endpoint) en drop-in replacement
+- [x] Configuration des fournisseurs LLM + tokens côté proxy (`config/providers.yaml`, monté en volume, clés via `.env`)
+- [x] Transfert de la requête au fournisseur configuré et relai de la réponse (méthode, path+query, body, headers, streaming)
+
+**Fait le 2026-09-14.** Sélection du fournisseur via l'en-tête `X-ProxyLLM-Provider` (sinon `default_provider`). La clé `Authorization` envoyée par le client est ignorée : le proxy injecte systématiquement la clé configurée côté serveur (`api_key_env`). Validé avec un fournisseur mock sur le réseau Docker (GET, POST + body JSON, en-têtes).
+
+- [x] Interface de test dans l'admin (`/test.html` + route serveur `POST /api/test` qui relaie vers le proxy) pour tester l'API sans terminal.
+- [x] Champ clé API optionnel dans l'interface de test (en-tête `X-ProxyLLM-Api-Key`, surcharge `.env` pour l'appel en cours, sans persistance).
 
 ## Étape 2 — Moteur d'observabilité (méthode Unité)
 
@@ -67,4 +72,4 @@ Suivi de l'avancement par étape. Coché = fait, décoché = à faire.
 
 ---
 
-**Prochaine étape à prioriser : Étape 1 (passthrough proxy) ou Étape 3 (moteur de règles), selon ce que tu veux poser en premier — à discuter.**
+**Prochaine étape à prioriser : Étape 2 (observabilité) ou Étape 3 (moteur de règles), selon ce que tu veux poser en premier — à discuter.**
