@@ -75,14 +75,19 @@ Page dédiée : **http://162.19.241.44:45322/fourmi.html** (carte "Fourmi 3D" du
 
 ⚠️ **Déclenché uniquement à la demande, jamais automatiquement** : ça double le nombre d'appels facturés au fournisseur pour l'appel analysé (un appel d'analyse en plus de l'appel d'origine). C'est un choix explicite pour ne pas doubler systématiquement les coûts de tous les appels.
 
-## Interface de test (dans l'admin)
+## Interface de test — Chat (dans l'admin)
 
 Page dédiée : **http://162.19.241.44:45322/test.html** (aussi accessible depuis la carte "Test API" du dashboard).
 
-- Formulaire : fournisseur, méthode, chemin, corps JSON, **clé API optionnelle**.
-- Le bouton "Envoyer via le proxy" appelle `POST /api/test` sur l'admin, qui relaie côté serveur vers le proxy (pas de CORS à gérer) et affiche le statut HTTP, la latence et le corps de la réponse.
-- Clé API : si le champ est rempli, elle surcharge (via l'en-tête `X-ProxyLLM-Api-Key`) la clé de `.env` pour cet appel uniquement — pratique pour tester sans éditer `.env` ni redémarrer les conteneurs. Si le champ est vide, le proxy retombe sur la clé configurée côté serveur (`api_key_env`).
-- ⚠️ La page est servie en HTTP simple (pas de TLS) sur une IP publique : une clé saisie dans ce champ transite en clair sur le réseau. À réserver à des clés de test / jetables tant qu'il n'y a pas de HTTPS devant l'admin.
+Interface de chat (bulles utilisateur/assistant), plutôt qu'un formulaire JSON à remplir à la main :
+
+- Barre de réglages : Fournisseur, Modèle, Clé API — partagée avec `fourmi.html` via le `localStorage` du navigateur.
+- Chaque message envoyé accumule l'historique de la conversation (`messages[]`, format OpenAI chat) et l'envoie en entier à chaque tour, pour un vrai contexte multi-tours.
+- Sous chaque réponse : statut HTTP, latence, modèle, et **le nombre de tokens** (`usage.total_tokens`, détaillé prompt+completion si fourni par le fournisseur) — rien n'est perdu par rapport à l'ancien formulaire.
+- Lien "voir la réponse brute" sous chaque réponse pour retrouver le JSON complet si besoin de débogage.
+- "Nouvelle conversation" réinitialise l'historique.
+- Toujours `POST /api/test` côté admin en coulisse (relais serveur vers le proxy, pas de CORS) — aucun changement côté backend.
+- ⚠️ Page servie en HTTP simple (pas de TLS) sur une IP publique : la clé transite en clair sur le réseau. À réserver à des clés de test / jetables tant qu'il n'y a pas de HTTPS devant l'admin.
 
 ## Commandes Make
 
