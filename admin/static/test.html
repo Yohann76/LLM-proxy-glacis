@@ -118,6 +118,12 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const API_KEY_STORAGE = 'proxyllm_api_key';
+
+    try {
+      const savedKey = localStorage.getItem(API_KEY_STORAGE);
+      if (savedKey) $('apiKey').value = savedKey;
+    } catch (_) {}
 
     $('send').addEventListener('click', async () => {
       const btn = $('send');
@@ -133,6 +139,11 @@
         body: $('method').value === 'GET' ? null : $('body').value,
         api_key: $('apiKey').value.trim(),
       };
+
+      try {
+        if (payload.api_key) localStorage.setItem(API_KEY_STORAGE, payload.api_key);
+        else localStorage.removeItem(API_KEY_STORAGE);
+      } catch (_) {}
 
       try {
         const res = await fetch('/api/test', {

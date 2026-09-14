@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — Fourmi 3D</title>
+  <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.80.0/dist/3d-force-graph.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid #262a33;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    header h1 { margin: 0; font-size: 1.15rem; }
+    header a { color: #7aa2f7; font-size: .85rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    header p.hint { margin: 0; color: #9aa2af; font-size: .78rem; }
+    .toolbar { margin-left: auto; display: flex; align-items: center; gap: .75rem; }
+    button {
+      background: #3b6fe0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: .4rem 1rem;
+      font-size: .8rem;
+      cursor: pointer;
+    }
+    button:hover { background: #4c7cf0; }
+    button:disabled { opacity: .5; cursor: default; }
+    #apiKey {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 6px;
+      color: #e6e6e6;
+      padding: .35rem .6rem;
+      font-size: .78rem;
+      width: 160px;
+    }
+
+    .layout { flex: 1; display: flex; min-height: 0; }
+    #sidebar {
+      width: 320px;
+      flex-shrink: 0;
+      border-right: 1px solid #262a33;
+      overflow-y: auto;
+    }
+    #sidebar .empty { padding: 1.5rem; color: #9aa2af; font-size: .85rem; }
+    .req-item {
+      padding: .6rem 1rem;
+      border-bottom: 1px solid #1c1f27;
+      cursor: pointer;
+      font-size: .78rem;
+    }
+    .req-item:hover { background: #171a21; }
+    .req-item.active { background: #171a21; border-left: 3px solid #3b6fe0; }
+    .req-item .top { display: flex; justify-content: space-between; color: #9aa2af; margin-bottom: .2rem; }
+    .req-item .action { color: #e6e6e6; font-family: ui-monospace, monospace; }
+    .req-item .pill {
+      display: inline-block;
+      padding: .05rem .4rem;
+      border-radius: 999px;
+      font-size: .68rem;
+      margin-left: .3rem;
+    }
+    .pill.ok { background: #1f3b2c; color: #7ee787; }
+    .pill.ko { background: #3b1f1f; color: #ff7b72; }
+
+    #graphWrap { flex: 1; position: relative; }
+    #graph { width: 100%; height: 100%; }
+    #graphEmpty {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #9aa2af; font-size: .9rem; text-align: center; padding: 2rem;
+    }
+    #legend {
+      position: absolute;
+      bottom: 1rem;
+      left: 1rem;
+      background: rgba(23, 26, 33, 0.85);
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: .75rem 1rem;
+      font-size: .72rem;
+      display: grid;
+      grid-template-columns: repeat(2, auto);
+      gap: .25rem 1rem;
+    }
+    #legend .row { display: flex; align-items: center; gap: .4rem; white-space: nowrap; }
+    #legend .dot { width: .6rem; height: .6rem; border-radius: 50%; flex-shrink: 0; }
+    #note {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      max-width: 260px;
+      background: rgba(23, 26, 33, 0.85);
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: .6rem .8rem;
+      font-size: .7rem;
+      color: #9aa2af;
+    }
+    #analysisPanel {
+      position: absolute;
+      bottom: 1rem;
+      right: 1rem;
+      max-width: 320px;
+      background: rgba(23, 26, 33, 0.92);
+      border: 1px solid #3b6fe0;
+      border-radius: 8px;
+      padding: .75rem .9rem;
+      font-size: .74rem;
+    }
+    #analysisPanel h3 { margin: 0 0 .5rem; font-size: .8rem; color: #7aa2f7; }
+    #analysisPanel .row { display: flex; gap: .4rem; margin-bottom: .25rem; }
+    #analysisPanel .row .dot { width: .55rem; height: .55rem; border-radius: 50%; margin-top: .3rem; flex-shrink: 0; }
+    #analysisPanel .row .label { color: #9aa2af; width: 60px; flex-shrink: 0; }
+    #analysisPanel .error { color: #ff7b72; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Fourmi 3D — Observabilité</h1>
+    <p class="hint">Chaque appel LLM représenté comme un graphe Fourmi (cf. <code>Docs/Fourmi.md</code>)</p>
+    <a href="/">&larr; dashboard</a>
+    <div class="toolbar">
+      <input id="apiKey" type="password" placeholder="Clé API (sk-...)" autocomplete="off" title="Clé du client, jamais lue depuis .env — partagée avec test.html via ce navigateur" />
+      <button id="analyze" disabled>Analyser avec le LLM</button>
+      <button id="refresh">Rafraîchir la liste</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <div id="sidebar"><div class="empty">Chargement…</div></div>
+    <div id="graphWrap">
+      <div id="graph"></div>
+      <div id="graphEmpty">Sélectionne un appel à gauche pour afficher sa Fourmi.</div>
+      <div id="legend"></div>
+      <div id="note">
+        Par défaut, Acteur/Contexte/Ressource/Risque/Objectif/Mission viennent de métadonnées
+        techniques (en-têtes, IP, config), pas du sens du prompt. Le bouton
+        <strong>« Analyser avec le LLM »</strong> fait relire l'action par le LLM lui-même
+        pour en déduire ces axes naturellement (double le nombre d'appels facturés pour cet
+        appel — déclenché uniquement à la demande). Étages relationnels
+        <strong>Interaction</strong> et <strong>Égrégore</strong> non modélisés (agrégation
+        multi-appels non implémentée, §2–3 de Fourmi.md). <strong>Acteur induit</strong> non
+        détecté (pas de moteur de règles — Étape 3).
+      </div>
+      <div id="analysisPanel" hidden></div>
+    </div>
+  </div>
+
+  <script>
+    const API_KEY_STORAGE = 'proxyllm_api_key';
+    try {
+      const savedKey = localStorage.getItem(API_KEY_STORAGE);
+      if (savedKey) document.getElementById('apiKey').value = savedKey;
+    } catch (_) {}
+    document.getElementById('apiKey').addEventListener('change', (e) => {
+      try {
+        if (e.target.value) localStorage.setItem(API_KEY_STORAGE, e.target.value);
+        else localStorage.removeItem(API_KEY_STORAGE);
+      } catch (_) {}
+    });
+
+    const LEGEND = [
+      ['Action', '#f44e3b'], ['Acteur', '#000000'], ['Ressource', '#999999'],
+      ['Contexte', '#73d8ff'], ['Risque', '#fb9e00'], ['Livrable', '#68bc00'],
+      ['Objectif', '#fcdc00'], ['Mission', '#7b64ff'], ['Logs', '#8B5A2B'],
+      ['Lien', '#0b3d91'],
+    ];
+    document.getElementById('legend').innerHTML = LEGEND.map(([label, color]) =>
+      `<div class="row"><span class="dot" style="background:${color}"></span>${label}</div>`
+    ).join('');
+
+    const graphEl = document.getElementById('graph');
+    const graphEmpty = document.getElementById('graphEmpty');
+    let Graph = null;
+
+    function initGraph() {
+      if (Graph) return Graph;
+      Graph = ForceGraph3D()(graphEl)
+        .backgroundColor('#0f1115')
+        .nodeLabel((n) => `<div style="font:12px sans-serif;color:#0f1115;background:#e6e6e6;padding:4px 8px;border-radius:4px;max-width:260px;white-space:normal;"><b>${n.group}</b><br/>${escapeHtml(n.detail)}</div>`)
+        .nodeColor((n) => n.color)
+        .nodeRelSize(6)
+        .nodeOpacity(0.95)
+        .linkLabel((l) => l.verb)
+        .linkColor(() => 'rgba(200,200,200,0.35)')
+        .linkDirectionalArrowLength(4.5)
+        .linkDirectionalArrowRelPos(1)
+        .linkCurvature(0.18)
+        .linkWidth(0.6);
+      return Graph;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    function truncate(s, n) {
+      s = String(s ?? '');
+      return s.length > n ? s.slice(0, n - 1) + '…' : s;
+    }
+
+    /**
+     * Traduit une unité d'observabilité (les 9 axes, cf. cahier des charges
+     * §2.1) en graphe Fourmi (Docs/Fourmi.md §1, §5, §8). Sous-ensemble
+     * fidèle à la structure logique canonique + boucle de capitalisation ;
+     * Interaction / Égrégore / Acteur induit non couverts (cf. bandeau note).
+     */
+    function toFourmi(u) {
+      const actionLabel = u.action || `${u.logs.method} ${u.logs.path}`;
+      const nodes = [
+        { id: 'action',    group: 'Action',    color: '#f44e3b', detail: actionLabel },
+        { id: 'acteur',    group: 'Acteur',    color: '#000000', detail: u.acteur },
+        { id: 'ressource', group: 'Ressource', color: '#999999', detail: u.ressource },
+        { id: 'contexte',  group: 'Contexte',  color: '#73d8ff', detail: u.contexte },
+        { id: 'risque',    group: 'Risque',    color: '#fb9e00', detail: u.risques },
+        { id: 'livrable',  group: 'Livrable',  color: '#68bc00', detail: u.realisation },
+        { id: 'objectif',  group: 'Objectif',  color: '#fcdc00', detail: u.objectif },
+        { id: 'mission',   group: 'Mission',   color: '#7b64ff', detail: u.mission },
+        { id: 'logs',      group: 'Logs',      color: '#8B5A2B', detail: `${u.logs.status} · ${u.logs.latency_ms} ms · ${u.logs.request_bytes} o` },
+        { id: 'lien',      group: 'Lien',      color: '#0b3d91', detail: u.relation },
+      ];
+      const links = [
+        { source: 'acteur',    target: 'action',    verb: 'réalise' },
+        { source: 'ressource', target: 'action',    verb: 'permet' },
+        { source: 'contexte',  target: 'action',    verb: 'influence' },
+        { source: 'risque',    target: 'action',    verb: 'menace' },
+        { source: 'lien',      target: 'action',    verb: 'permet' },
+        { source: 'action',    target: 'livrable',  verb: 'produit' },
+        { source: 'livrable',  target: 'objectif',  verb: 'contribue à' },
+        { source: 'mission',   target: 'objectif',  verb: 'donne sens à' },
+        { source: 'action',    target: 'logs',      verb: 'génère' },
+        { source: 'logs',      target: 'action',    verb: 'documente' },
+      ];
+      return { nodes, links };
+    }
+
+    let currentUnite = null;
+    let currentGraphData = null;
+
+    function showFourmi(u) {
+      graphEmpty.style.display = 'none';
+      currentUnite = u;
+      currentGraphData = toFourmi(u);
+      const g = initGraph();
+      g.graphData(currentGraphData);
+      document.getElementById('analyze').disabled = false;
+      document.getElementById('analysisPanel').hidden = true;
+    }
+
+    const AXIS_META = {
+      acteur:    { id: 'acteur',    label: 'Acteur',    color: '#000000' },
+      contexte:  { id: 'contexte',  label: 'Contexte',  color: '#73d8ff' },
+      ressource: { id: 'ressource', label: 'Ressource', color: '#999999' },
+      risque:    { id: 'risque',    label: 'Risque',    color: '#fb9e00' },
+      objectif:  { id: 'objectif',  label: 'Objectif',  color: '#fcdc00' },
+      mission:   { id: 'mission',   label: 'Mission',   color: '#7b64ff' },
+    };
+
+    /**
+     * Fait analyser l'action par le LLM lui-même (via /api/analyze côté
+     * admin, qui réutilise le passthrough /v1/chat/completions du proxy)
+     * pour déduire Acteur/Contexte/Ressource/Risque/Objectif/Mission du sens
+     * réel du prompt — à la demande uniquement (double le coût facturé pour
+     * cet appel, cf. bandeau de note sur la page).
+     */
+    document.getElementById('analyze').addEventListener('click', async () => {
+      if (!currentUnite) return;
+      const btn = document.getElementById('analyze');
+      const panel = document.getElementById('analysisPanel');
+      btn.disabled = true;
+      btn.textContent = 'Analyse en cours…';
+      panel.hidden = true;
+
+      const [provider, ...modelParts] = (currentUnite.ressource || '').split('/');
+      const model = modelParts.join('/');
+      const api_key = document.getElementById('apiKey').value.trim();
+
+      try {
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: currentUnite.action, provider, model, api_key }),
+        });
+        const data = await res.json();
+
+        if (data.ok && data.fourmi) {
+          for (const key of Object.keys(AXIS_META)) {
+            const value = data.fourmi[key];
+            if (!value || !currentGraphData) continue;
+            const node = currentGraphData.nodes.find((n) => n.id === AXIS_META[key].id);
+            if (node) node.detail = value;
+          }
+          panel.hidden = false;
+          panel.innerHTML = '<h3>Analyse LLM</h3>' + Object.keys(AXIS_META).map((key) => {
+            const m = AXIS_META[key];
+            const value = data.fourmi[key];
+            if (!value) return '';
+            return `<div class="row"><span class="dot" style="background:${m.color}"></span><span class="label">${m.label}</span><span>${escapeHtml(value)}</span></div>`;
+          }).join('');
+        } else {
+          panel.hidden = false;
+          panel.innerHTML = `<h3>Analyse LLM</h3><div class="error">${escapeHtml(data.error || 'échec inconnu')}</div>` +
+            (data.raw ? `<div style="margin-top:.4rem;white-space:pre-wrap;">${escapeHtml(data.raw)}</div>` : '');
+        }
+      } catch (e) {
+        panel.hidden = false;
+        panel.innerHTML = `<h3>Analyse LLM</h3><div class="error">Erreur réseau : ${escapeHtml(e)}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyser avec le LLM';
+      }
+    });
+
+    let requests = [];
+    let activeId = null;
+
+    function renderSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      if (requests.length === 0) {
+        sidebar.innerHTML = '<div class="empty">Aucun appel enregistré — envoie une requête via /test.html, puis rafraîchis.</div>';
+        return;
+      }
+      sidebar.innerHTML = requests.map((u) => {
+        const ok = u.logs.status < 400;
+        const t = new Date(u.timestamp_unix_ms).toLocaleTimeString('fr-FR');
+        return `<div class="req-item ${u.request_id === activeId ? 'active' : ''}" data-id="${u.request_id}">
+          <div class="top"><span>${t}</span><span class="pill ${ok ? 'ok' : 'ko'}">${u.logs.status}</span></div>
+          <div class="action">${escapeHtml(truncate(u.action || (u.logs.method + ' ' + u.logs.path), 34))}</div>
+          <div>${escapeHtml(truncate(u.mission, 30))}</div>
+        </div>`;
+      }).join('');
+
+      sidebar.querySelectorAll('.req-item').forEach((el) => {
+        el.addEventListener('click', () => {
+          activeId = el.dataset.id;
+          renderSidebar();
+          const u = requests.find((r) => r.request_id === activeId);
+          if (u) showFourmi(u);
+        });
+      });
+    }
+
+    async function load() {
+      try {
+        const res = await fetch('/api/observability?limit=100');
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          requests = data;
+          renderSidebar();
+        }
+      } catch (e) {
+        document.getElementById('sidebar').innerHTML = `<div class="empty">Erreur réseau : ${escapeHtml(e)}</div>`;
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', load);
+    load();
+  </script>
+</body>
+</html>

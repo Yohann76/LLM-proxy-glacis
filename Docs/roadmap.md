@@ -26,9 +26,25 @@ Suivi de l'avancement par étape. Coché = fait, décoché = à faire.
 
 ## Étape 2 — Moteur d'observabilité (méthode Unité)
 
-- [ ] Extraction des 9 axes (Acteur, Contexte, Ressource, Logs, Risques, Relation, Réalisation, Objectif, Mission) par requête
-- [ ] Écriture des logs structurés en tâche asynchrone
-- [ ] Export OpenTelemetry
+- [x] Extraction des 9 axes (Acteur, Contexte, Ressource, Logs, Risques, Relation, Réalisation, Objectif, Mission) par requête
+- [x] Écriture des logs structurés en tâche asynchrone
+- [x] Export OpenTelemetry
+
+**Fait le 2026-09-14.** Module `proxy/src/unite.rs`. Chaque appel `/v1/*` est décomposé en une `UniteRecord` (les 9 axes) puis journalisé en JSON sur stdout et exporté en OTLP/HTTP (JSON, sans SDK opentelemetry officiel — implémentation manuelle légère pour rester simple et sans dépendance protoc/tonic) si `OTEL_EXPORTER_OTLP_ENDPOINT` est défini. L'émission tourne dans une tâche `tokio::spawn` : aucune attente ajoutée sur la réponse renvoyée au client.
+
+**Mise à jour du 2026-09-14 (soir) : champ `action`.** Ajout d'un champ `action` à l'`UniteRecord`, extrait du dernier message `"role": "user"` du corps JSON (`messages[]`), tronqué à 80 caractères — l'intention réelle du prompt (verbe + objet, esprit Fourmi §1.1), pas juste `méthode + chemin`. Fallback sur `méthode + chemin` si non exploitable. ⚠️ Peut contenir des données sensibles saisies par l'utilisateur ; décision explicite de l'accepter en attendant le masquage PII (Étape 4) plutôt que de garder un label purement technique — validé avec l'utilisateur. Répercuté dans l'export OTLP (`proxyllm.action`), la vue Observabilité (colonne Action) et la vue Fourmi 3D (label du nœud Action).
+
+Sources des axes (MVP, avant les étapes 3/6) :
+- **Acteur** : en-tête `X-ProxyLLM-Actor`, sinon IP du pair (`ConnectInfo`).
+- **Contexte** : en-tête `X-ProxyLLM-Context`, sinon `User-Agent`.
+- **Ressource** : `fournisseur/modèle` (modèle extrait du champ `model` du body JSON si présent).
+- **Logs** : méthode, chemin, statut, latence, taille de la requête.
+- **Risques** : toujours `non_evalue` — sera calculé par le moteur de règles (Étape 3).
+- **Relation** : en-tête `X-ProxyLLM-Session`, sinon `isolee`.
+- **Réalisation** : succès/erreur + taille de la réponse (ou `stream` si en streaming).
+- **Objectif** / **Mission** : en-têtes `X-ProxyLLM-Objective` / `X-ProxyLLM-Mission`, sinon `non_precise`.
+
+Validé avec un fournisseur mock + un vrai collecteur OpenTelemetry (`otel/opentelemetry-collector`, exporter debug) sur le réseau Docker : span reçu avec les 9 axes en attributs.
 
 ## Étape 3 — Moteur de règles symboliques (Policy-as-Code)
 
@@ -64,12 +80,36 @@ Suivi de l'avancement par étape. Coché = fait, décoché = à faire.
 ## Étape 8 — Interface admin (dashboard)
 
 - [ ] Vue Règles (éditeur Policy-as-Code)
-- [ ] Vue Observabilité (exploration des séquences par la grille Unité)
+- [x] Vue Observabilité (exploration des séquences par la grille Unité) — fusionnée dans la vue Fourmi 3D, voir plus bas
 - [ ] Vue Compliance (génération/téléchargement des rapports)
 - [ ] Vue FinOps (coûts, quotas, alertes)
 - [ ] Vue Fournisseurs (config LLM + fallback)
 - [ ] Gestion des accès (clés API virtuelles)
 
+**Vue Observabilité faite le 2026-09-14, supprimée le 2026-09-14 (nuit).** `admin/static/observability.html` (tableau des dernières unités) faisait doublon avec la liste latérale de la vue Fourmi 3D (mêmes données, via `GET /api/observability`). Retirée du dashboard et du disque à la demande de l'utilisateur ; seule la vue Fourmi 3D subsiste comme point d'entrée Observabilité.
+
+- [x] Vue Fourmi 3D (WebGL) — chaque appel représenté comme un graphe selon la méthode Fourmi (`Docs/Fourmi.md`)
+
+**Fait le 2026-09-14.** `admin/static/fourmi.html` (carte "Fourmi 3D" du dashboard — seul point d'entrée Observabilité de l'admin). Bibliothèque `3d-force-graph@1.80.0` (WebGL/Three.js, CDN jsdelivr). Liste des derniers appels à gauche (via `GET /api/observability`), clic → rendu 3D du graphe Fourmi de cet appel.
+
+Mapping unité → Fourmi (sous-ensemble fidèle à Fourmi.md §8, boucle 1) :
+- Action = méthode + chemin ; Acteur/Ressource/Contexte/Risque/Livrable/Objectif/Mission/Logs = axes correspondants de l'unité.
+- Lien (bleu foncé) approximé par l'axe Relation de l'unité (`X-ProxyLLM-Session` ou `isolee`).
+- Arêtes rendues : `réalise`, `permet` (Ressource et Lien → Action), `influence`, `menace`, `produit`, `contribue à`, `donne sens à`, `génère`, `documente`.
+
+**Non couvert (nécessite une agrégation sur plusieurs appels, pas encore implémentée côté proxy)** — affiché explicitement dans un bandeau sur la page :
+- **Interaction** (distincte du Lien) — pas de suivi de flux daté par acteur/session.
+- **Égrégore** — nécessiterait une détection de motif récurrent sur plusieurs missions/contextes, avec une `norme_prescrite` qui reste d'appréciation humaine (cf. Fourmi.md §3.6, §6).
+- **Acteur induit** — nécessiterait le moteur de règles (Étape 3) pour détecter les effets de bord sur des tiers non participants.
+
+- [x] Analyse sémantique à la demande (bouton "Analyser avec le LLM")
+
+**Fait le 2026-09-14 (soir).** Par défaut, Acteur/Contexte/Ressource/Risque/Objectif/Mission restent dérivés de métadonnées techniques (en-têtes, IP, config) — pas du sens du prompt. Sur demande explicite (bouton dans `fourmi.html`), `POST /api/analyze` (admin) fait relire l'action par le LLM lui-même (réutilise `/v1/chat/completions` du proxy, même fournisseur/modèle que l'appel d'origine) avec un prompt système dédié qui demande une décomposition Fourmi en JSON. Le résultat met à jour le graphe 3D et s'affiche dans un panneau dédié.
+
+Décision (validée avec l'utilisateur, cf. §"Prochaine étape" précédente) : pas d'analyse automatique sur chaque appel — ça doublerait systématiquement le coût facturé. Uniquement à la demande, appel par appel. Testé de bout en bout avec un fournisseur mock imitant une vraie réponse `chat.completion` : extraction JSON correcte depuis `choices[0].message.content` (y compris nettoyage des balises markdown ```json``` si le LLM les ajoute), et gestion propre des erreurs (clé manquante, JSON non exploitable).
+
+**Correction du 2026-09-14 (nuit) : clé API du client, pas de `.env`.** Initialement, l'analyse retombait sur la clé serveur (`api_key_env`) faute de mieux. Ajout d'un champ "Clé API" dans `fourmi.html` (identique à celui de `test.html`), envoyé via `X-ProxyLLM-Api-Key` et jamais lu depuis l'environnement du conteneur admin. Les deux pages partagent la valeur via `localStorage` du navigateur (jamais persistée côté serveur). Sans clé saisie, erreur explicite plutôt qu'un fallback silencieux sur `.env`. Vérifié bout en bout (comparaison de l'`Authorization` reçu par un mock, avec/sans clé cliente).
+
 ---
 
-**Prochaine étape à prioriser : Étape 2 (observabilité) ou Étape 3 (moteur de règles), selon ce que tu veux poser en premier — à discuter.**
+**Prochaine étape à prioriser : Étape 3 (moteur de règles) ou Étape 4 (masquage PII), selon ce que tu veux poser en premier — à discuter.**
