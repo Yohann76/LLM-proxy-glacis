@@ -1,0 +1,43 @@
+# Règles symboliques (Policy-as-Code) — Étape 3, cf. Docs/cahier-des-charges.md §2.2.
+#
+# Évaluées DANS L'ORDRE. Sémantique "premier match décisif gagne" :
+#   - "autoriser" et "bloquer" arrêtent l'évaluation dès qu'une règle matche
+#     (donc une règle "autoriser" placée avant une règle "bloquer" plus
+#     générale peut créer une exception explicite) ;
+#   - "alerter" et "masquer" s'accumulent sans arrêter l'évaluation.
+#
+# Conditions disponibles dans "when" (toutes doivent matcher — ET logique) :
+#   acteur, acteur_contains, contexte, contexte_contains, provider,
+#   mission, mission_contains, objectif, objectif_contains,
+#   action_contains (sous-chaîne, insensible à la casse),
+#   action_matches (regex, cf. crate `regex` de Rust)
+#
+# Une règle "masquer" utilise "action_matches" comme motif de recherche ET
+# de remplacement : les occurrences trouvées sont substituées par
+# "replacement" (par défaut "[MASQUE]"), à la fois dans l'axe Action
+# (observabilité) et dans le corps de la requête transféré au fournisseur.
+#
+# Fichier surveillé et rechargé à chaud (~2s) : éditer et enregistrer suffit,
+# pas besoin de redémarrer le proxy.
+
+rules:
+  - name: "Autoriser explicitement les missions de test interne"
+    when:
+      mission_contains: "test"
+    then: [autoriser]
+
+  - name: "Bloquer les instructions destructrices en base de données"
+    when:
+      action_matches: '(?i)\b(DROP\s+TABLE|DELETE\s+FROM|TRUNCATE)\b'
+    then: [bloquer, alerter]
+
+  - name: "Masquer les adresses email dans les prompts"
+    when:
+      action_matches: '[\w.+-]+@[\w-]+\.[\w.-]+'
+    then: [masquer]
+    replacement: "[EMAIL_MASQUE]"
+
+  - name: "Alerter sur les tentatives de contournement des instructions"
+    when:
+      action_contains: "ignore les instructions"
+    then: [alerter]

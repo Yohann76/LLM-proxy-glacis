@@ -31,6 +31,8 @@ async fn main() {
         .route("/api/test", post(api_test))
         .route("/api/observability", get(api_observability))
         .route("/api/analyze", post(api_analyze))
+        .route("/api/rules", get(api_rules))
+        .route("/api/rules/test", post(api_rules_test))
         .fallback_service(ServeDir::new("static").append_index_html_on_directories(true))
         .with_state(state);
 
@@ -136,16 +138,20 @@ async fn api_observability(
     }
 }
 
-const FOURMI_SYSTEM_PROMPT: &str = r#"Tu es un moteur d'analyse selon la méthode Fourmi : une action est un système complet — qui agit, dans quel contexte, avec quelle ressource, sous quel risque, pour produire quoi, au service de quel objectif et de quelle mission.
+// Note : l'axe Risque n'est PAS demandé ici — depuis l'Étape 3, il est
+// calculé par le vrai moteur de règles symboliques (config/rules.yaml), pas
+// deviné par un LLM. Le mélanger à une estimation sémantique reviendrait à
+// dégrader une valeur déterministe en une supposition.
+const FOURMI_SYSTEM_PROMPT: &str = r#"Tu es un moteur d'analyse selon la méthode Fourmi : une action est un système complet — qui agit, dans quel contexte, avec quelle ressource, pour produire quoi, au service de quel objectif et de quelle mission.
 
 On te donne une action (le prompt envoyé à un assistant IA). Déduis chaque axe du SENS RÉEL de cette action, jamais de sa forme technique. Réponds UNIQUEMENT avec un objet JSON strictement de cette forme, sans texte autour, sans balises markdown :
 
-{"acteur": "...", "contexte": "...", "ressource": "...", "risque": "...", "objectif": "...", "mission": "..."}
+{"acteur": "...", "contexte": "...", "ressource": "...", "objectif": "...", "mission": "..."}
 
 Chaque valeur est une phrase courte (moins de 12 mots), en français.
 
 Exemple — action "Dire bonjour en une phrase" :
-{"acteur": "celui qui exécute le prompt", "contexte": "avoir quelqu'un avec qui dialoguer", "ressource": "un support de communication", "risque": "ne pas parvenir à communiquer", "objectif": "transmettre un message", "mission": "communiquer"}"#;
+{"acteur": "celui qui exécute le prompt", "contexte": "avoir quelqu'un avec qui dialoguer", "ressource": "un support de communication", "objectif": "transmettre un message", "mission": "communiquer"}"#;
 
 #[derive(Debug, Deserialize)]
 struct AnalyzeRequest {
@@ -254,5 +260,54 @@ async fn api_analyze(State(state): State<AppState>, Json(req): Json<AnalyzeReque
             ..Default::default()
         })
         .into_response(),
+    }
+}
+
+/// Relaie le jeu de règles courant (`GET /internal/rules` côté proxy) pour
+/// la vue "Règles" de l'admin.
+async fn api_rules(State(state): State<AppState>) -> impl IntoResponse {
+    let url = format!("{}/internal/rules", state.proxy_url.trim_end_matches('/'));
+    match state.http.get(&url).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("réponse du proxy illisible : {e}"),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Relaie un test de décision (`POST /internal/rules/test` côté proxy) —
+/// évalue des faits saisis à la main contre le jeu de règles courant, sans
+/// faire de vraie requête LLM.
+async fn api_rules_test(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let url = format!(
+        "{}/internal/rules/test",
+        state.proxy_url.trim_end_matches('/')
+    );
+    match state.http.post(&url).json(&body).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("réponse du proxy illisible : {e}"),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
     }
 }

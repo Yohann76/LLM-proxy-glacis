@@ -1,3 +1,4 @@
+mod rules;
 mod unite;
 
 use axum::{
@@ -5,7 +6,7 @@ use axum::{
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
-    routing::{any, get},
+    routing::{any, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -30,6 +31,7 @@ struct AppState {
     config: Arc<Config>,
     http: reqwest::Client,
     unites: Store,
+    rule_engine: rules::RuleEngine,
 }
 
 #[tokio::main]
@@ -55,16 +57,24 @@ async fn main() {
         ),
     }
 
+    let rules_path =
+        std::env::var("PROXY_RULES").unwrap_or_else(|_| "config/rules.yaml".to_string());
+    let rule_engine = rules::RuleEngine::load_initial(rules_path.into());
+    rule_engine.spawn_watcher(std::time::Duration::from_secs(2));
+
     let state = AppState {
         config: Arc::new(config),
         http: reqwest::Client::new(),
         unites: Store::new(),
+        rule_engine,
     };
 
     let app = Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .route("/internal/unites", get(list_unites))
+        .route("/internal/rules", get(list_rules))
+        .route("/internal/rules/test", post(test_rules))
         .route("/v1/*rest", any(passthrough))
         .with_state(state);
 
@@ -107,6 +117,47 @@ async fn list_unites(
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Introspection du jeu de règles courant (utile pour vérifier un
+/// rechargement à chaud sans SSH dans le conteneur).
+async fn list_rules(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.rule_engine.summary().await)
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct TestFactsInput {
+    acteur: Option<String>,
+    contexte: Option<String>,
+    provider: Option<String>,
+    mission: Option<String>,
+    objectif: Option<String>,
+    action: Option<String>,
+}
+
+/// Évalue des faits fournis à la main contre le jeu de règles courant, sans
+/// faire de vraie requête LLM — pour la vue "Règles" de l'admin (tester une
+/// décision avant de l'appliquer en vrai).
+async fn test_rules(
+    State(state): State<AppState>,
+    Json(input): Json<TestFactsInput>,
+) -> Json<serde_json::Value> {
+    let facts = rules::Facts {
+        acteur: input.acteur.as_deref().unwrap_or(""),
+        contexte: input.contexte.as_deref().unwrap_or(""),
+        provider: input.provider.as_deref().unwrap_or(""),
+        mission: input.mission.as_deref().unwrap_or(""),
+        objectif: input.objectif.as_deref().unwrap_or(""),
+        action: input.action.as_deref().unwrap_or(""),
+    };
+    let decision = state.rule_engine.evaluate(&facts).await;
+    Json(json!({
+        "blocked_by": decision.blocked_by,
+        "allowed_by": decision.allowed_by,
+        "alerts": decision.alerts,
+        "masks": decision.mask_rules,
+        "summary": decision.summary(),
+    }))
 }
 
 /// Relaie toute requête `/v1/*` vers le fournisseur LLM configuré.
@@ -164,6 +215,64 @@ async fn passthrough(
         None => provider_name.clone(),
     };
 
+    // Moteur de règles symboliques (Étape 3) : évaluation synchrone, sur le
+    // chemin critique, avant tout appel réseau au fournisseur — c'est ce qui
+    // garde le surcoût largement sous les 5 ms visés (comparaisons de
+    // chaînes + regex précompilées, aucune I/O).
+    let decision = state
+        .rule_engine
+        .evaluate(&rules::Facts {
+            acteur: &acteur,
+            contexte: &contexte,
+            provider: &provider_name,
+            mission: &mission,
+            objectif: &objectif,
+            action: &action,
+        })
+        .await;
+    let risques = decision.summary();
+
+    if let Some(rule_name) = decision.blocked_by.clone() {
+        emit_unite(
+            &state,
+            request_id,
+            action,
+            acteur,
+            contexte,
+            ressource,
+            relation,
+            objectif,
+            mission,
+            method_str,
+            path,
+            StatusCode::FORBIDDEN.as_u16(),
+            start.elapsed().as_millis(),
+            request_bytes,
+            risques.clone(),
+            format!("bloque par la regle '{rule_name}'"),
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            format!("requête bloquée par la règle « {rule_name} »"),
+        )
+            .into_response();
+    }
+
+    // "Masquer" : appliqué à la fois sur l'axe Action (ce qui est journalisé
+    // / affiché) et sur le corps forwardé au fournisseur — sinon on
+    // masquerait l'observabilité sans masquer ce qui part réellement chez
+    // le tiers, ce qui serait pire qu'inutile.
+    let (action, body) = if decision.has_masks() {
+        let masked_action = decision.apply_masks(&action);
+        let masked_body = match std::str::from_utf8(&body) {
+            Ok(text) => Bytes::from(decision.apply_masks(text)),
+            Err(_) => body,
+        };
+        (masked_action, masked_body)
+    } else {
+        (action, body)
+    };
+
     let Some(provider) = state.config.providers.get(&provider_name) else {
         emit_unite(
             &state,
@@ -180,6 +289,7 @@ async fn passthrough(
             StatusCode::BAD_GATEWAY.as_u16(),
             start.elapsed().as_millis(),
             request_bytes,
+            risques,
             "fournisseur inconnu".to_string(),
         );
         return (
@@ -213,6 +323,7 @@ async fn passthrough(
                     StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
                     start.elapsed().as_millis(),
                     request_bytes,
+                    risques,
                     "clé API manquante".to_string(),
                 );
                 return (
@@ -273,6 +384,7 @@ async fn passthrough(
                 StatusCode::BAD_GATEWAY.as_u16(),
                 start.elapsed().as_millis(),
                 request_bytes,
+                risques,
                 format!("erreur fournisseur : {e}"),
             );
             return (StatusCode::BAD_GATEWAY, format!("erreur fournisseur : {e}")).into_response();
@@ -317,6 +429,7 @@ async fn passthrough(
         status.as_u16(),
         start.elapsed().as_millis(),
         request_bytes,
+        risques,
         realisation,
     );
 
@@ -402,6 +515,7 @@ fn emit_unite(
     status: u16,
     latency_ms: u128,
     request_bytes: usize,
+    risques: String,
     realisation: String,
 ) {
     let record = UniteRecord {
@@ -418,9 +532,7 @@ fn emit_unite(
             latency_ms,
             request_bytes,
         },
-        // Le moteur de règles symboliques (Étape 3 de la roadmap) n'existe
-        // pas encore : aucun score de risque n'est calculé pour l'instant.
-        risques: "non_evalue".to_string(),
+        risques,
         relation,
         realisation,
         objectif,

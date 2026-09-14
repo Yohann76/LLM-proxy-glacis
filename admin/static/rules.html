@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — Règles</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #262a33;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header a { color: #7aa2f7; font-size: .85rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    .toolbar { margin-left: auto; display: flex; align-items: center; gap: .75rem; font-size: .8rem; color: #9aa2af; }
+    button {
+      background: #3b6fe0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: .45rem 1.1rem;
+      font-size: .8rem;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #4c7cf0; }
+    button:disabled { opacity: .6; cursor: default; }
+
+    main { max-width: 1000px; margin: 0 auto; padding: 2rem; display: flex; flex-direction: column; gap: 2rem; }
+    section h2 { font-size: 1rem; margin: 0 0 1rem; }
+    section p.hint { color: #9aa2af; font-size: .8rem; margin: -.5rem 0 1rem; }
+
+    .rule-card {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      margin-bottom: .8rem;
+    }
+    .rule-card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+    .rule-card h3 { margin: 0; font-size: .92rem; }
+    .actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+    .action-pill {
+      font-size: .68rem;
+      padding: .15rem .55rem;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .02em;
+    }
+    .action-pill.bloquer { background: #3b1f1f; color: #ff7b72; }
+    .action-pill.alerter { background: #3b2f1f; color: #fbbf7e; }
+    .action-pill.masquer { background: #1f2c3b; color: #7ec3ff; }
+    .action-pill.autoriser { background: #1f3b2c; color: #7ee787; }
+    .when-list {
+      margin-top: .6rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: .4rem;
+      font-size: .74rem;
+    }
+    .when-item {
+      background: #0c0e12;
+      border: 1px solid #262a33;
+      border-radius: 5px;
+      padding: .2rem .5rem;
+      font-family: ui-monospace, monospace;
+      color: #9aa2af;
+    }
+    .when-item b { color: #e6e6e6; font-weight: 500; }
+    .empty { color: #9aa2af; font-size: .85rem; padding: 1rem; }
+
+    .tester {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1.2rem;
+    }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin-bottom: .8rem; }
+    .grid label { display: block; font-size: .75rem; color: #9aa2af; margin-bottom: .25rem; }
+    .grid input, .grid textarea {
+      width: 100%;
+      box-sizing: border-box;
+      background: #0c0e12;
+      border: 1px solid #262a33;
+      border-radius: 6px;
+      color: #e6e6e6;
+      padding: .5rem .6rem;
+      font-family: inherit;
+      font-size: .82rem;
+    }
+    .grid .full { grid-column: 1 / -1; }
+    #testResult {
+      margin-top: 1rem;
+      display: none;
+      background: #0c0e12;
+      border: 1px solid #262a33;
+      border-radius: 6px;
+      padding: .8rem 1rem;
+      font-size: .82rem;
+    }
+    #testResult .verdict { font-weight: 600; margin-bottom: .5rem; }
+    #testResult .verdict.bloque { color: #ff7b72; }
+    #testResult .verdict.autorise { color: #7ee787; }
+    #testResult .verdict.neutre { color: #e6e6e6; }
+    #testResult ul { margin: .3rem 0; padding-left: 1.2rem; color: #9aa2af; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Règles (Policy-as-Code)</h1>
+    <a href="/">&larr; dashboard</a>
+    <div class="toolbar">
+      <span id="count"></span>
+      <button id="refresh">Rafraîchir</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Règles chargées</h2>
+      <p class="hint">
+        Lues depuis <code>config/rules.yaml</code> (rechargé à chaud côté proxy toutes les ~2 s :
+        rafraîchis cette page après une modification du fichier pour voir le nouveau jeu de règles).
+      </p>
+      <div id="rulesList"><div class="empty">Chargement…</div></div>
+    </section>
+
+    <section>
+      <h2>Tester une décision</h2>
+      <p class="hint">
+        Évalue des faits saisis à la main contre le jeu de règles courant, sans faire de vraie
+        requête LLM (pas de coût, pas d'appel fournisseur).
+      </p>
+      <div class="tester">
+        <div class="grid">
+          <div><label for="fActeur">Acteur</label><input id="fActeur" placeholder="ex: 162.19.241.44" /></div>
+          <div><label for="fContexte">Contexte</label><input id="fContexte" placeholder="ex: cursor-ide" /></div>
+          <div><label for="fProvider">Fournisseur</label><input id="fProvider" placeholder="ex: openai" /></div>
+          <div><label for="fMission">Mission</label><input id="fMission" placeholder="ex: test-e2e" /></div>
+          <div><label for="fObjectif">Objectif</label><input id="fObjectif" placeholder="ex: non_precise" /></div>
+          <div class="full">
+            <label for="fAction">Action (le prompt simulé)</label>
+            <textarea id="fAction" rows="2" placeholder="ex: Peux-tu écrire un DROP TABLE users ?"></textarea>
+          </div>
+        </div>
+        <button id="test">Tester</button>
+        <div id="testResult"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    function renderRules(data) {
+      const list = $('rulesList');
+      $('count').textContent = `${data.count} règle(s)`;
+
+      if (!data.rules || data.rules.length === 0) {
+        list.innerHTML = '<div class="empty">Aucune règle chargée.</div>';
+        return;
+      }
+
+      list.innerHTML = data.rules.map((r) => {
+        const actions = r.then.map((a) => `<span class="action-pill ${a}">${a}</span>`).join('');
+        const whenItems = Object.entries(r.when || {})
+          .filter(([, v]) => v !== null && v !== undefined && v !== '')
+          .map(([k, v]) => `<span class="when-item">${k} = <b>${escapeHtml(v)}</b></span>`)
+          .join('');
+        return `<div class="rule-card">
+          <div class="top">
+            <h3>${escapeHtml(r.name)}</h3>
+            <div class="actions">${actions}</div>
+          </div>
+          <div class="when-list">${whenItems || '<span class="when-item">(aucune condition — matche toujours)</span>'}</div>
+        </div>`;
+      }).join('');
+    }
+
+    async function loadRules() {
+      $('rulesList').innerHTML = '<div class="empty">Chargement…</div>';
+      try {
+        const res = await fetch('/api/rules');
+        const data = await res.json();
+        renderRules(data);
+      } catch (e) {
+        $('rulesList').innerHTML = `<div class="empty">Erreur réseau : ${escapeHtml(e)}</div>`;
+      }
+    }
+
+    $('refresh').addEventListener('click', loadRules);
+    loadRules();
+
+    $('test').addEventListener('click', async () => {
+      const btn = $('test');
+      const result = $('testResult');
+      btn.disabled = true;
+      btn.textContent = 'Test en cours…';
+
+      const payload = {
+        acteur: $('fActeur').value.trim(),
+        contexte: $('fContexte').value.trim(),
+        provider: $('fProvider').value.trim(),
+        mission: $('fMission').value.trim(),
+        objectif: $('fObjectif').value.trim(),
+        action: $('fAction').value.trim(),
+      };
+
+      try {
+        const res = await fetch('/api/rules/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        let verdictClass = 'neutre';
+        if (data.blocked_by) verdictClass = 'bloque';
+        else if (data.allowed_by) verdictClass = 'autorise';
+
+        let html = `<div class="verdict ${verdictClass}">${escapeHtml(data.summary)}</div>`;
+        if (data.alerts && data.alerts.length) {
+          html += `<div>Alertes déclenchées :</div><ul>${data.alerts.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>`;
+        }
+        if (data.masks && data.masks.length) {
+          html += `<div>Masquages déclenchés :</div><ul>${data.masks.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>`;
+        }
+        result.innerHTML = html;
+        result.style.display = 'block';
+      } catch (e) {
+        result.innerHTML = `<div class="verdict bloque">Erreur réseau : ${escapeHtml(e)}</div>`;
+        result.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Tester';
+      }
+    });
+  </script>
+</body>
+</html>

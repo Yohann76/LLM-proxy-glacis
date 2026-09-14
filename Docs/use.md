@@ -37,7 +37,35 @@ curl http://162.19.241.44:45321/v1/chat/completions \
 
 - Fournisseur utilisé : `default_provider` du fichier de config, ou celui indiqué via l'en-tête `X-ProxyLLM-Provider: mistral`.
 - La clé `Authorization` envoyée par le client est ignorée — le proxy injecte toujours la clé configurée côté serveur.
-- Aucun contrôle métier pour l'instant (pas de règles, pas de masquage PII) : c'est un simple relais transparent — voir `roadmap.md` pour la suite.
+- Depuis l'Étape 3, chaque requête passe par le moteur de règles avant transfert (voir section dédiée ci-dessous) : elle peut être bloquée ou son contenu masqué. Pas encore de détection PII automatique générique (Étape 4) — seulement ce que les règles explicitement configurées couvrent.
+
+## Moteur de règles symboliques (Policy-as-Code)
+
+Fichier : **`config/rules.yaml`** (monté en volume, éditable sans rebuild — rechargé automatiquement en ~2 s, pas besoin de redémarrer le conteneur `proxy`).
+
+```yaml
+rules:
+  - name: "Bloquer les instructions destructrices en base de données"
+    when:
+      action_matches: '(?i)\b(DROP\s+TABLE|DELETE\s+FROM|TRUNCATE)\b'
+    then: [bloquer, alerter]
+```
+
+- Conditions dans `when` (toutes doivent matcher — ET logique) : `acteur`/`acteur_contains`, `contexte`/`contexte_contains`, `provider`, `mission`/`mission_contains`, `objectif`/`objectif_contains`, `action_contains`, `action_matches` (regex).
+- Actions dans `then` : `autoriser`, `bloquer`, `alerter`, `masquer` (une ou plusieurs). Évaluées **dans l'ordre du fichier**, "premier match décisif gagne" : `autoriser`/`bloquer` arrêtent l'évaluation (place une règle `autoriser` **avant** une règle `bloquer` plus générale pour créer une exception) ; `alerter`/`masquer` s'accumulent sans arrêter.
+- `bloquer` → `403` immédiat, rien n'est envoyé au fournisseur.
+- `masquer` → réutilise `action_matches` comme motif, remplacé par `replacement` (défaut `[MASQUE]`) — appliqué **à la fois** au corps réellement transféré au fournisseur et à l'axe Action de l'observabilité.
+- `alerter` → ne bloque pas, mais visible dans l'axe **Risques** (et les logs/OTLP/Fourmi 3D).
+- 4 règles d'exemple livrées par défaut (une par action) — à adapter ou remplacer selon tes besoins.
+- ⚠️ Évaluation **synchrone**, avant l'appel réseau au fournisseur (chemin critique, budget < 5 ms) — pas de logique lourde ou d'appel externe dans une règle.
+
+### Vue Règles (dans l'admin)
+
+Page dédiée : **http://162.19.241.44:45322/rules.html** (carte "Règles (Policy-as-Code)" du dashboard).
+
+- **Liste des règles chargées** : nom, conditions (`when`), actions (`then`) — reflète `config/rules.yaml` tel qu'actuellement chargé côté proxy (bouton "Rafraîchir" après une modif, le rechargement à chaud prenant jusqu'à ~2 s).
+- **Testeur de décision** : formulaire (Acteur, Contexte, Fournisseur, Mission, Objectif, Action) qui évalue les faits saisis contre le jeu de règles courant et affiche le verdict — **sans faire de vraie requête LLM**, donc sans coût ni appel fournisseur. Pratique pour vérifier qu'une règle fait ce qu'on croit avant de l'exposer à du vrai trafic.
+- Backend : `GET /internal/rules` et `POST /internal/rules/test` côté proxy, relayés par l'admin (`GET /api/rules`, `POST /api/rules/test`) — même schéma que les autres vues.
 
 ## Observabilité (méthode Unité)
 
@@ -66,7 +94,7 @@ Page dédiée : **http://162.19.241.44:45322/fourmi.html** (carte "Fourmi 3D" du
 - Chaque appel LLM est traduit en graphe 3D navigable (WebGL, `3d-force-graph` via CDN) selon la méthode Fourmi décrite dans `Docs/Fourmi.md`.
 - Liste des derniers appels à gauche (heure, statut, action, mission) ; cliquer sur un appel affiche son graphe : Action (rouge, centre) reliée à Acteur, Ressource, Contexte, Risque, Livrable, Objectif, Mission, Logs et Lien, avec les couleurs et verbes de la charte officielle.
 - Alimentée par l'historique en mémoire du proxy (200 dernières unités, `GET /internal/unites`), relayé par l'admin (`GET /api/observability`). Aucune donnée sensible dans les métadonnées de base (pas de corps de requête/réponse — voir le champ `action` séparément ci-dessus). **Non persisté** : redémarrer le conteneur `proxy` vide l'historique.
-- **Étages Interaction et Égrégore non représentés** : ils demandent une agrégation sur plusieurs appels (fréquence, motifs récurrents, `norme_prescrite`) que le proxy ne calcule pas encore. **Acteur induit** non plus (nécessite le moteur de règles, Étape 3). Un bandeau sur la page le rappelle.
+- **Étages Interaction et Égrégore non représentés** : ils demandent une agrégation sur plusieurs appels (fréquence, motifs récurrents, `norme_prescrite`) que le proxy ne calcule pas encore. **Acteur induit** non plus. Un bandeau sur la page le rappelle.
 - Survoler un nœud affiche son contenu complet ; les libellés longs sont tronqués dans la liste.
 
 **Bouton "Analyser avec le LLM"** : par défaut, Acteur/Contexte/Ressource/Risque/Objectif/Mission viennent de métadonnées techniques (en-têtes, IP, config), pas du sens du prompt. Ce bouton fait relire l'action par le LLM lui-même (même fournisseur/modèle que l'appel d'origine, réutilise `/v1/chat/completions`) pour en déduire ces 6 axes naturellement, à partir du sens réel de l'action — pas seulement de sa forme technique. Résultat affiché dans un panneau en bas à droite et injecté dans le graphe 3D (survoler les nœuds pour voir les nouvelles valeurs).

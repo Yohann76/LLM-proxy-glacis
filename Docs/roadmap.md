@@ -39,7 +39,7 @@ Sources des axes (MVP, avant les étapes 3/6) :
 - **Contexte** : en-tête `X-ProxyLLM-Context`, sinon `User-Agent`.
 - **Ressource** : `fournisseur/modèle` (modèle extrait du champ `model` du body JSON si présent).
 - **Logs** : méthode, chemin, statut, latence, taille de la requête.
-- **Risques** : toujours `non_evalue` — sera calculé par le moteur de règles (Étape 3).
+- **Risques** : `non_evalue` en l'absence de règle déclenchée — calculé par le moteur de règles depuis l'Étape 3 (voir plus bas).
 - **Relation** : en-tête `X-ProxyLLM-Session`, sinon `isolee`.
 - **Réalisation** : succès/erreur + taille de la réponse (ou `stream` si en streaming).
 - **Objectif** / **Mission** : en-têtes `X-ProxyLLM-Objective` / `X-ProxyLLM-Mission`, sinon `non_precise`.
@@ -48,10 +48,41 @@ Validé avec un fournisseur mock + un vrai collecteur OpenTelemetry (`otel/opent
 
 ## Étape 3 — Moteur de règles symboliques (Policy-as-Code)
 
-- [ ] Format des règles YAML/JSON
-- [ ] Chargement/rechargement à chaud des règles
-- [ ] Évaluation des règles sur le chemin synchrone (< 5 ms)
-- [ ] Actions : Bloquer / Alerter / Masquer / Autoriser
+- [x] Format des règles YAML/JSON
+- [x] Chargement/rechargement à chaud des règles
+- [x] Évaluation des règles sur le chemin synchrone (< 5 ms)
+- [x] Actions : Bloquer / Alerter / Masquer / Autoriser
+
+**Fait le 2026-09-14 (soir).** Module `proxy/src/rules.rs`. Règles chargées depuis `config/rules.yaml` (monté en volume, comme `providers.yaml`), rechargées automatiquement par scrutation du fichier (mtime) toutes les 2 s — pas de redémarrage requis. Premier chargement invalide = échec fatal (cohérence avec `providers.yaml`) ; un rechargement à chaud invalide log une erreur et conserve l'ancien jeu de règles.
+
+Format d'une règle :
+```yaml
+rules:
+  - name: "..."
+    when: { acteur_contains: "...", action_matches: "regex", ... }   # ET logique entre les conditions
+    then: [autoriser|bloquer|alerter|masquer]                        # une ou plusieurs actions
+    replacement: "[TEXTE]"                                            # pour "masquer" uniquement
+```
+Conditions dans `when` : `acteur(_contains)`, `contexte(_contains)`, `provider`, `mission(_contains)`, `objectif(_contains)`, `action_contains`, `action_matches` (regex, précompilée au chargement — jamais par requête).
+
+Évaluation synchrone, sur le chemin critique, **avant** tout appel réseau au fournisseur — c'est ce qui garde le surcoût sous les 5 ms visés (comparaisons de chaînes + regex précompilées, aucune I/O). Sémantique "premier match décisif gagne" en parcourant les règles dans l'ordre : `autoriser`/`bloquer` arrêtent l'évaluation (donc une règle `autoriser` placée avant une règle `bloquer` plus générale crée une exception) ; `alerter`/`masquer` s'accumulent sans arrêter.
+
+- `bloquer` → réponse `403` immédiate, rien n'est transféré au fournisseur.
+- `masquer` → substitution regex appliquée à la fois sur le corps transféré au fournisseur **et** sur l'axe Action de l'unité d'observabilité (sinon on masquerait l'observabilité sans masquer ce qui part réellement chez le tiers).
+- `alerter` → pas de blocage, mais visible dans l'axe Risques et les logs.
+- `autoriser` → arrête l'évaluation, aucune règle suivante (ex. un `bloquer` plus générique) ne s'applique.
+
+L'axe **Risques** de l'unité d'observabilité (Étape 2) reflète maintenant le résultat réel de l'évaluation (ex. `"bloque par la regle 'X'"`, `"alerte(s) : Y"`, `"1 masquage(s) applique(s)"`, ou `"aucune regle declenchee"`) — ça referme la boucle demandée par l'utilisateur ("les risques doivent découler de l'action").
+
+`config/rules.yaml` livré avec 4 règles d'exemple (une par action), reprenant l'exemple du cahier des charges (bloquer un `DROP TABLE`), plus un masquage d'emails, une alerte sur tentative de contournement de prompt, et une autorisation explicite par mission qui montre la priorité d'ordre.
+
+Endpoint d'introspection `GET /internal/rules` (nom + conditions + actions de chaque règle chargée) pour vérifier un rechargement sans SSH.
+
+Validé bout en bout avec un fournisseur mock : les 4 actions déclenchées séparément (bloquer → 403 sans toucher le fournisseur ; masquer → email effectivement remplacé dans le corps réellement envoyé ; alerter → passe mais visible dans Risques ; autoriser → contourne une règle de blocage plus générale placée après). Rechargement à chaud testé dans les deux sens (ajout d'une règle canari → blocage immédiat sans redémarrage ; retrait → déblocage immédiat) via le volume monté, sans toucher au conteneur. Latence totale mesurée (réseau loopback + règles + mock) : 2 à 5 ms — l'évaluation des règles elle-même en est une fraction négligeable.
+
+- [x] Vue Règles dans l'admin (`rules.html`)
+
+**Fait le 2026-09-14 (nuit).** Carte "Règles (Policy-as-Code)" du dashboard, plus `POST /internal/rules/test` côté proxy (relayé par `POST /api/rules/test`) pour un testeur de décision sans coût : formulaire de faits (Acteur/Contexte/Fournisseur/Mission/Objectif/Action) → verdict (bloqué/autorisé/alertes/masquages), sans appeler le LLM. La liste des règles chargées (nom/conditions/actions) vient de `GET /internal/rules`, déjà en place. `AXIS_META` de `fourmi.html` et le prompt système de `POST /api/analyze` ont été corrigés au passage pour ne plus faire deviner l'axe Risque par le LLM, puisqu'il est désormais une vraie valeur déterministe issue du moteur de règles.
 
 ## Étape 4 — Détection & masquage PII/secrets
 
@@ -100,7 +131,7 @@ Mapping unité → Fourmi (sous-ensemble fidèle à Fourmi.md §8, boucle 1) :
 **Non couvert (nécessite une agrégation sur plusieurs appels, pas encore implémentée côté proxy)** — affiché explicitement dans un bandeau sur la page :
 - **Interaction** (distincte du Lien) — pas de suivi de flux daté par acteur/session.
 - **Égrégore** — nécessiterait une détection de motif récurrent sur plusieurs missions/contextes, avec une `norme_prescrite` qui reste d'appréciation humaine (cf. Fourmi.md §3.6, §6).
-- **Acteur induit** — nécessiterait le moteur de règles (Étape 3) pour détecter les effets de bord sur des tiers non participants.
+- **Acteur induit** — le moteur de règles (Étape 3) existe désormais, mais rien n'y détecte spécifiquement les effets de bord sur des tiers non participants ; resterait à écrire une règle/heuristique dédiée.
 
 - [x] Analyse sémantique à la demande (bouton "Analyser avec le LLM")
 

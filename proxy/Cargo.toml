@@ -11,3 +11,4 @@ serde_json = "1"
 serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 uuid = { version = "1", features = ["v4"] }
+regex = "1"

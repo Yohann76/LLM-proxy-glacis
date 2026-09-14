@@ -150,14 +150,16 @@
       <div id="graphEmpty">Sélectionne un appel à gauche pour afficher sa Fourmi.</div>
       <div id="legend"></div>
       <div id="note">
-        Par défaut, Acteur/Contexte/Ressource/Risque/Objectif/Mission viennent de métadonnées
-        techniques (en-têtes, IP, config), pas du sens du prompt. Le bouton
+        Par défaut, Acteur/Contexte/Ressource/Objectif/Mission viennent de métadonnées
+        techniques (en-têtes, IP, config), pas du sens du prompt — le bouton
         <strong>« Analyser avec le LLM »</strong> fait relire l'action par le LLM lui-même
         pour en déduire ces axes naturellement (double le nombre d'appels facturés pour cet
-        appel — déclenché uniquement à la demande). Étages relationnels
-        <strong>Interaction</strong> et <strong>Égrégore</strong> non modélisés (agrégation
-        multi-appels non implémentée, §2–3 de Fourmi.md). <strong>Acteur induit</strong> non
-        détecté (pas de moteur de règles — Étape 3).
+        appel — déclenché uniquement à la demande). <strong>Risque</strong> vient du vrai
+        moteur de règles (<code>config/rules.yaml</code>, Étape 3) : bloqué/alerté/masqué/autorisé
+        selon les règles configurées. Étages relationnels <strong>Interaction</strong> et
+        <strong>Égrégore</strong> non modélisés (agrégation multi-appels non implémentée,
+        §2–3 de Fourmi.md). <strong>Acteur induit</strong> non détecté (pas de règle dédiée
+        pour l'instant).
       </div>
       <div id="analysisPanel" hidden></div>
     </div>
@@ -266,11 +268,12 @@
       document.getElementById('analysisPanel').hidden = true;
     }
 
+    // Risque n'y figure pas : depuis l'Étape 3, il vient du vrai moteur de
+    // règles (config/rules.yaml), pas d'une estimation LLM.
     const AXIS_META = {
       acteur:    { id: 'acteur',    label: 'Acteur',    color: '#000000' },
       contexte:  { id: 'contexte',  label: 'Contexte',  color: '#73d8ff' },
       ressource: { id: 'ressource', label: 'Ressource', color: '#999999' },
-      risque:    { id: 'risque',    label: 'Risque',    color: '#fb9e00' },
       objectif:  { id: 'objectif',  label: 'Objectif',  color: '#fcdc00' },
       mission:   { id: 'mission',   label: 'Mission',   color: '#7b64ff' },
     };
