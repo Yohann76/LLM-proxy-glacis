@@ -77,6 +77,21 @@ Page dédiée : **http://162.19.241.44:45322/rules.html** (carte "Règles (Polic
 - **Testeur de décision** : formulaire (Acteur, Contexte, Fournisseur, Mission, Objectif, Action) qui évalue les faits saisis contre le jeu de règles courant et affiche le verdict — **sans faire de vraie requête LLM**, donc sans coût ni appel fournisseur. Pratique pour vérifier qu'une règle fait ce qu'on croit avant de l'exposer à du vrai trafic.
 - Backend : `GET /internal/rules` et `POST /internal/rules/test` côté proxy, relayés par l'admin (`GET /api/rules`, `POST /api/rules/test`) — même schéma que les autres vues.
 
+## Auditabilité & rapport de conformité
+
+Journal d'audit persistant : **`data/audit.jsonl`** (monté en volume, `./data:/app/data`) — une ligne JSON par appel, jamais écrasée. Contrairement à l'historique en mémoire de la vue Fourmi 3D (200 entrées, perdu au redémarrage), ce journal **survit aux redémarrages du conteneur** : c'est la source du rapport de conformité.
+
+### Vue Compliance (dans l'admin)
+
+Page dédiée : **http://162.19.241.44:45322/compliance.html** (carte "Compliance" du dashboard).
+
+- **Cartes de synthèse** : requêtes totales, bloquées, alertes, PII/secrets masqués, erreurs.
+- **Répartition** par fournisseur, par mission, par catégorie PII détectée.
+- **Tables d'événements** : appels bloqués, appels avec PII détectée, alertes — acteur, action, règle/catégorie, horodatage.
+- **Filtre de période** optionnel (Depuis/Jusqu'à) — sans filtre, tout le journal disponible.
+- **Téléchargement JSON ou PDF** en un clic ("1-Click Compliance Report") — le PDF reprend le même contenu, mis en page en texte simple (pas de design élaboré, l'objectif est la traçabilité).
+- Backend : `GET /internal/compliance-report?format=json|pdf&since=...&until=...` côté proxy, relayé tel quel par l'admin (`GET /api/compliance-report`) — le PDF n'est jamais rechargé en mémoire, juste transmis en bytes.
+
 ## Observabilité (méthode Unité)
 
 Chaque appel `/v1/*` est journalisé en JSON structuré (`docker logs proxyllm-proxy`), avec les 9 axes (Acteur, Contexte, Ressource, Logs, Risques, Relation, Réalisation, Objectif, Mission) **plus un champ `action`** : le dernier message `"role": "user"` du corps JSON (`messages[]`, format OpenAI chat), tronqué à 80 caractères — c'est l'intention réelle envoyée au LLM, pas juste la forme technique de l'appel HTTP. Fallback sur `méthode + chemin` si le corps n'est pas exploitable (GET, format non conversationnel).

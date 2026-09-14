@@ -110,8 +110,16 @@ Validé bout en bout avec un fournisseur mock qui journalise sur son propre stdo
 
 ## Étape 5 — Auditabilité & conformité AI Act
 
-- [ ] Historisation des décisions (règle appliquée, acteur, résultat)
-- [ ] Génération de rapport (1-Click Compliance Report) en PDF/JSON
+- [x] Historisation des décisions (règle appliquée, acteur, résultat)
+- [x] Génération de rapport (1-Click Compliance Report) en PDF/JSON
+
+**Fait le 2026-09-14 (nuit).** Module `proxy/src/audit.rs`.
+
+**Historisation persistante** : contrairement à l'historique en mémoire de l'Étape 2 (`unite::Store`, 200 entrées, perdu au redémarrage), chaque unité est désormais aussi ajoutée à un journal `data/audit.jsonl` (une ligne JSON par appel, append-only), monté en volume (`./data:/app/data`, ajouté à `docker-compose.yml`). Écriture faite dans la même tâche asynchrone que le reste (§Étape 2) : hors chemin critique. Testé : après `docker compose restart proxy`, le rapport de conformité garde tout l'historique alors que la vue Fourmi 3D (mémoire) repart à zéro — c'est la distinction voulue entre observabilité temps réel et audit durable.
+
+**Génération de rapport** : `GET /internal/compliance-report` (query `format=json|pdf`, `since`/`until` en timestamp unix ms optionnels) agrège le journal — volumétrie totale, décisions bloquées/alertes/PII masqués avec le détail de chaque événement (acteur, action, règle/catégorie), répartition par fournisseur et par mission. Le PDF (crate `printpdf`, police standard Helvetica, pagination manuelle simple) reprend le même contenu que le JSON, mis en forme en texte — dates converties en UTC lisible via un petit algorithme maison (civil_from_days de Howard Hinnant) pour éviter une dépendance chrono/time supplémentaire.
+
+Validé bout en bout : 5 requêtes de test (1 bloquée, 1 alerte, 1 avec PII/secret détecté, 2 neutres) → rapport JSON et PDF cohérents entre eux, PDF vérifié lisible (texte extrait avec `pypdf`), persistance confirmée après redémarrage du conteneur.
 
 ## Étape 6 — FinOps & administration
 
@@ -128,9 +136,9 @@ Validé bout en bout avec un fournisseur mock qui journalise sur son propre stdo
 
 ## Étape 8 — Interface admin (dashboard)
 
-- [ ] Vue Règles (éditeur Policy-as-Code)
+- [x] Vue Règles (éditeur Policy-as-Code) — liste + testeur de décision, `rules.html` (cf. Étape 3)
 - [x] Vue Observabilité (exploration des séquences par la grille Unité) — fusionnée dans la vue Fourmi 3D, voir plus bas
-- [ ] Vue Compliance (génération/téléchargement des rapports)
+- [x] Vue Compliance (génération/téléchargement des rapports) — `compliance.html` (cf. Étape 5)
 - [ ] Vue FinOps (coûts, quotas, alertes)
 - [ ] Vue Fournisseurs (config LLM + fallback)
 - [ ] Gestion des accès (clés API virtuelles)

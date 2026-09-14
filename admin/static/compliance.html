@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — Conformité</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #262a33;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header a { color: #7aa2f7; font-size: .85rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    main { max-width: 1000px; margin: 0 auto; padding: 2rem; display: flex; flex-direction: column; gap: 2rem; }
+
+    .toolbar {
+      display: flex;
+      gap: .8rem;
+      align-items: flex-end;
+      flex-wrap: wrap;
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+    }
+    .toolbar label { display: block; font-size: .72rem; color: #9aa2af; margin-bottom: .25rem; }
+    .toolbar input {
+      background: #0c0e12;
+      border: 1px solid #262a33;
+      border-radius: 6px;
+      color: #e6e6e6;
+      padding: .4rem .55rem;
+      font-size: .8rem;
+    }
+    button {
+      background: #3b6fe0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: .5rem 1.1rem;
+      font-size: .82rem;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #4c7cf0; }
+    button:disabled { opacity: .6; cursor: default; }
+    button.secondary { background: #262a33; }
+    button.secondary:hover:not(:disabled) { background: #333947; }
+
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; }
+    .stat {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+    }
+    .stat .value { font-size: 1.6rem; font-weight: 600; }
+    .stat .label { font-size: .75rem; color: #9aa2af; margin-top: .2rem; }
+    .stat.blocked .value { color: #ff7b72; }
+    .stat.alert .value { color: #fbbf7e; }
+    .stat.pii .value { color: #7ec3ff; }
+    .stat.error .value { color: #ff7b72; }
+
+    section h2 { font-size: 1rem; margin: 0 0 .8rem; }
+    .breakdown { display: flex; gap: 2rem; flex-wrap: wrap; }
+    .breakdown .col { min-width: 180px; }
+    .breakdown .row { display: flex; justify-content: space-between; font-size: .82rem; padding: .25rem 0; border-bottom: 1px solid #1c1f27; }
+
+    table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    thead th { text-align: left; padding: .4rem .5rem; color: #9aa2af; border-bottom: 1px solid #262a33; }
+    tbody td { padding: .4rem .5rem; border-bottom: 1px solid #1c1f27; }
+    .mono { font-family: ui-monospace, monospace; }
+    .empty { color: #9aa2af; font-size: .85rem; padding: .5rem 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Rapport de conformité</h1>
+    <a href="/">&larr; dashboard</a>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <div>
+        <label for="since">Depuis (optionnel)</label>
+        <input id="since" type="datetime-local" />
+      </div>
+      <div>
+        <label for="until">Jusqu'à (optionnel)</label>
+        <input id="until" type="datetime-local" />
+      </div>
+      <button id="refresh">Actualiser</button>
+      <button id="downloadJson" class="secondary">Télécharger JSON</button>
+      <button id="downloadPdf" class="secondary">Télécharger PDF</button>
+    </div>
+
+    <div id="content">
+      <p class="empty">Chargement…</p>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    function fmt(ms) {
+      return new Date(ms).toLocaleString('fr-FR');
+    }
+
+    function currentParams() {
+      const params = new URLSearchParams();
+      const since = $('since').value;
+      const until = $('until').value;
+      if (since) params.set('since', new Date(since).getTime());
+      if (until) params.set('until', new Date(until).getTime());
+      return params;
+    }
+
+    function eventTable(title, events, emptyLabel) {
+      if (!events || events.length === 0) {
+        return `<section><h2>${title}</h2><p class="empty">${emptyLabel}</p></section>`;
+      }
+      const rows = events.map((e) => `<tr>
+        <td class="mono">${fmt(e.timestamp_unix_ms)}</td>
+        <td>${escapeHtml(e.acteur)}</td>
+        <td>${escapeHtml(e.action)}</td>
+        <td>${escapeHtml(e.detail)}</td>
+      </tr>`).join('');
+      return `<section>
+        <h2>${title} (${events.length} affiché(s))</h2>
+        <table>
+          <thead><tr><th>Horodatage</th><th>Acteur</th><th>Action</th><th>Détail</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </section>`;
+    }
+
+    function breakdownCols(report) {
+      const col = (title, obj) => {
+        const entries = Object.entries(obj || {});
+        const rows = entries.length
+          ? entries.map(([k, v]) => `<div class="row"><span>${escapeHtml(k)}</span><span>${v}</span></div>`).join('')
+          : '<p class="empty">(aucune donnée)</p>';
+        return `<div class="col"><h2>${title}</h2>${rows}</div>`;
+      };
+      return `<section class="breakdown">
+        ${col('Par fournisseur', report.by_provider)}
+        ${col('Par mission', report.by_mission)}
+        ${col('Catégories PII/secrets', report.pii_categories)}
+      </section>`;
+    }
+
+    async function load() {
+      const content = $('content');
+      content.innerHTML = '<p class="empty">Chargement…</p>';
+      try {
+        const res = await fetch(`/api/compliance-report?${currentParams().toString()}&format=json`);
+        const report = await res.json();
+
+        content.innerHTML = `
+          <section class="stats">
+            <div class="stat"><div class="value">${report.total_requests}</div><div class="label">Requêtes totales</div></div>
+            <div class="stat blocked"><div class="value">${report.blocked_count}</div><div class="label">Bloquées (règles)</div></div>
+            <div class="stat alert"><div class="value">${report.alert_count}</div><div class="label">Alertes</div></div>
+            <div class="stat pii"><div class="value">${report.pii_masked_count}</div><div class="label">PII/secrets masqués</div></div>
+            <div class="stat error"><div class="value">${report.error_count}</div><div class="label">Erreurs</div></div>
+          </section>
+          ${breakdownCols(report)}
+          ${eventTable('Événements bloqués (règles)', report.blocked_events, 'Aucun blocage sur la période.')}
+          ${eventTable('Événements avec PII/secrets détectés', report.pii_events, 'Aucune détection PII sur la période.')}
+          ${eventTable('Alertes déclenchées', report.alert_events, 'Aucune alerte sur la période.')}
+        `;
+      } catch (e) {
+        content.innerHTML = `<p class="empty">Erreur réseau : ${escapeHtml(e)}</p>`;
+      }
+    }
+
+    $('refresh').addEventListener('click', load);
+    $('downloadJson').addEventListener('click', () => {
+      window.open(`/api/compliance-report?${currentParams().toString()}&format=json`, '_blank');
+    });
+    $('downloadPdf').addEventListener('click', () => {
+      window.open(`/api/compliance-report?${currentParams().toString()}&format=pdf`, '_blank');
+    });
+
+    load();
+  </script>
+</body>
+</html>

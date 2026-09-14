@@ -9,7 +9,7 @@
 //! ce module n'ajoute donc aucune latence au chemin critique de la réponse
 //! renvoyée au client.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::VecDeque,
@@ -23,7 +23,7 @@ use uuid::Uuid;
 /// de l'admin. Aucune persistance : un redémarrage du proxy vide l'historique.
 pub const HISTORY_CAPACITY: usize = 200;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogsAxis {
     pub method: String,
     pub path: String,
@@ -33,7 +33,7 @@ pub struct LogsAxis {
 }
 
 /// Une "Unité" d'observabilité : la lecture structurée d'un appel LLM.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniteRecord {
     pub request_id: String,
     pub timestamp_unix_ms: u128,

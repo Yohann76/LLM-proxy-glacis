@@ -33,6 +33,7 @@ async fn main() {
         .route("/api/analyze", post(api_analyze))
         .route("/api/rules", get(api_rules))
         .route("/api/rules/test", post(api_rules_test))
+        .route("/api/compliance-report", get(api_compliance_report))
         .fallback_service(ServeDir::new("static").append_index_html_on_directories(true))
         .with_state(state);
 
@@ -304,6 +305,68 @@ async fn api_rules_test(
             )
                 .into_response(),
         },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Relaie le rapport de conformité (`GET /internal/compliance-report` côté
+/// proxy) — JSON ou PDF selon `?format=`, transmis tel quel (le PDF n'est
+/// jamais rechargé en mémoire sous une autre forme, juste transmis).
+async fn api_compliance_report(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let mut url = format!(
+        "{}/internal/compliance-report",
+        state.proxy_url.trim_end_matches('/')
+    );
+    if !params.is_empty() {
+        let qs: String = params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        url = format!("{url}?{qs}");
+    }
+
+    match state.http.get(&url).send().await {
+        Ok(resp) => {
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            let content_disposition = resp
+                .headers()
+                .get(reqwest::header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+
+            match resp.bytes().await {
+                Ok(bytes) => {
+                    let mut headers = axum::http::HeaderMap::new();
+                    if let Ok(v) = content_type.parse() {
+                        headers.insert(axum::http::header::CONTENT_TYPE, v);
+                    }
+                    if let Some(cd) = content_disposition {
+                        if let Ok(v) = cd.parse() {
+                            headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+                        }
+                    }
+                    (StatusCode::OK, headers, bytes).into_response()
+                }
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    format!("réponse du proxy illisible : {e}"),
+                )
+                    .into_response(),
+            }
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             format!("erreur de connexion au proxy : {e}"),

@@ -1,3 +1,4 @@
+mod audit;
 mod pii;
 mod rules;
 mod unite;
@@ -12,7 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use unite::{LogsAxis, Store, UniteRecord};
 
 #[derive(Debug, Deserialize, Clone)]
@@ -34,6 +35,7 @@ struct AppState {
     unites: Store,
     rule_engine: rules::RuleEngine,
     pii_masking_enabled: bool,
+    audit_log_path: Arc<PathBuf>,
 }
 
 #[tokio::main]
@@ -76,12 +78,22 @@ async fn main() {
         if pii_masking_enabled { "actif" } else { "désactivé (PROXY_PII_MASKING)" }
     );
 
+    // Auditabilité (Étape 5) : journal d'audit persistant, distinct de
+    // l'historique en mémoire de l'Étape 2 (qui reste, lui, borné et non
+    // persisté). Monté en volume (docker-compose : ./data:/app/data) pour
+    // survivre aux redémarrages du conteneur.
+    let audit_log_path: PathBuf = std::env::var("PROXY_AUDIT_LOG")
+        .unwrap_or_else(|_| "data/audit.jsonl".to_string())
+        .into();
+    println!("Journal d'audit : {}", audit_log_path.display());
+
     let state = AppState {
         config: Arc::new(config),
         http: reqwest::Client::new(),
         unites: Store::new(),
         rule_engine,
         pii_masking_enabled,
+        audit_log_path: Arc::new(audit_log_path),
     };
 
     let app = Router::new()
@@ -90,6 +102,7 @@ async fn main() {
         .route("/internal/unites", get(list_unites))
         .route("/internal/rules", get(list_rules))
         .route("/internal/rules/test", post(test_rules))
+        .route("/internal/compliance-report", get(compliance_report))
         .route("/v1/*rest", any(passthrough))
         .with_state(state);
 
@@ -173,6 +186,50 @@ async fn test_rules(
         "masks": decision.mask_rules,
         "summary": decision.summary(),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ComplianceQuery {
+    /// "json" (défaut) ou "pdf".
+    format: Option<String>,
+    /// Bornes de période en timestamp unix (ms). Non fournies = tout le
+    /// journal d'audit disponible.
+    since: Option<u64>,
+    until: Option<u64>,
+}
+
+/// "1-Click Compliance Report" (Étape 5, cf. cahier des charges §2.4) :
+/// agrège le journal d'audit persistant (`data/audit.jsonl`) en rapport
+/// JSON ou PDF — volumétrie, blocages, alertes, détections PII, de quoi
+/// répondre aux exigences de traçabilité de l'EU AI Act.
+async fn compliance_report(
+    State(state): State<AppState>,
+    Query(params): Query<ComplianceQuery>,
+) -> impl IntoResponse {
+    let records = audit::read_all(&state.audit_log_path);
+    let report = audit::compute_report(
+        &records,
+        params.since.map(u128::from),
+        params.until.map(u128::from),
+    );
+
+    if params.format.as_deref() == Some("pdf") {
+        let bytes = audit::render_pdf(&report);
+        (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "application/pdf".to_string()),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"rapport-conformite.pdf\"".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response()
+    } else {
+        Json(report).into_response()
+    }
 }
 
 /// Relaie toute requête `/v1/*` vers le fournisseur LLM configuré.
@@ -630,7 +687,9 @@ fn emit_unite(
 
     let http = state.http.clone();
     let store = state.unites.clone();
+    let audit_log_path = state.audit_log_path.clone();
     tokio::spawn(async move {
+        audit::append(&record, &audit_log_path).await;
         unite::emit(record, http, store).await;
     });
 }
