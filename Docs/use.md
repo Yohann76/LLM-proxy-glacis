@@ -59,6 +59,16 @@ rules:
 - 4 règles d'exemple livrées par défaut (une par action) — à adapter ou remplacer selon tes besoins.
 - ⚠️ Évaluation **synchrone**, avant l'appel réseau au fournisseur (chemin critique, budget < 5 ms) — pas de logique lourde ou d'appel externe dans une règle.
 
+## Détection & masquage PII/secrets (intégré)
+
+Contrairement aux règles ci-dessus (motifs à écrire à la main), cette détection est **active par défaut**, sans configuration : catégories `EMAIL`, `TELEPHONE`, `IBAN` (checksum mod-97), `CARTE_BANCAIRE` (checksum de Luhn), `SECRET_API` (`sk-`, `AKIA`, `ghp_`, `xox...-`).
+
+- Chaque occurrence → variable anonyme numérotée (`[EMAIL_1]`, `[SECRET_API_1]`...) envoyée au fournisseur à la place de la vraie valeur.
+- Si le fournisseur reprend le placeholder dans sa réponse, la vraie valeur est **réinjectée** avant de renvoyer la réponse au client — la seule catégorie de masquage de ce projet qui soit réversible (celles de `rules.yaml`, Étape 3, sont permanentes, pas de réinjection).
+- Conséquence : une réponse avec réinjection est bufferisée entièrement (pas de streaming SSE token-par-token) — seulement pour les appels où une PII a été détectée, le reste garde le streaming.
+- Désactivable uniquement côté serveur : `PROXY_PII_MASKING=off` dans `.env`. Jamais par un en-tête client (sinon n'importe qui pourrait contourner la protection).
+- **Visible dans l'interface** : badge **🔒 PII** dans la liste de `fourmi.html` (survol = catégories détectées) ; aussi dans l'axe Risques (`"PII detectee : SECRET_API"`) et l'axe Action (qui affiche directement le texte masqué).
+
 ### Vue Règles (dans l'admin)
 
 Page dédiée : **http://162.19.241.44:45322/rules.html** (carte "Règles (Policy-as-Code)" du dashboard).
@@ -71,7 +81,7 @@ Page dédiée : **http://162.19.241.44:45322/rules.html** (carte "Règles (Polic
 
 Chaque appel `/v1/*` est journalisé en JSON structuré (`docker logs proxyllm-proxy`), avec les 9 axes (Acteur, Contexte, Ressource, Logs, Risques, Relation, Réalisation, Objectif, Mission) **plus un champ `action`** : le dernier message `"role": "user"` du corps JSON (`messages[]`, format OpenAI chat), tronqué à 80 caractères — c'est l'intention réelle envoyée au LLM, pas juste la forme technique de l'appel HTTP. Fallback sur `méthode + chemin` si le corps n'est pas exploitable (GET, format non conversationnel).
 
-> ⚠️ Le champ `action` peut donc contenir du texte saisi par l'utilisateur, potentiellement sensible. Aucun masquage PII n'existe encore (Étape 4) : c'est un compromis assumé, visible dans les logs, l'export OTLP, et la vue Fourmi 3D de l'admin — exposée sans authentification (cf. avertissement plus haut).
+> ⚠️ Le champ `action` peut contenir du texte saisi par l'utilisateur — mais depuis l'Étape 4, tout ce qui matche une catégorie PII/secret connue y est déjà masqué (voir section dédiée plus haut). Ce qui reste en clair est ce qu'aucune règle (Étape 3) ni détection PII (Étape 4) n'a reconnu comme sensible : la protection est réelle mais pas exhaustive. Visible dans les logs, l'export OTLP, et la vue Fourmi 3D de l'admin — exposée sans authentification (cf. avertissement plus haut).
 
 Pour enrichir les axes, envoyer des en-têtes optionnels sur la requête :
 
@@ -96,6 +106,7 @@ Page dédiée : **http://162.19.241.44:45322/fourmi.html** (carte "Fourmi 3D" du
 - Alimentée par l'historique en mémoire du proxy (200 dernières unités, `GET /internal/unites`), relayé par l'admin (`GET /api/observability`). Aucune donnée sensible dans les métadonnées de base (pas de corps de requête/réponse — voir le champ `action` séparément ci-dessus). **Non persisté** : redémarrer le conteneur `proxy` vide l'historique.
 - **Étages Interaction et Égrégore non représentés** : ils demandent une agrégation sur plusieurs appels (fréquence, motifs récurrents, `norme_prescrite`) que le proxy ne calcule pas encore. **Acteur induit** non plus. Un bandeau sur la page le rappelle.
 - Survoler un nœud affiche son contenu complet ; les libellés longs sont tronqués dans la liste.
+- **Badge 🔒 PII** sur les appels où l'Étape 4 a détecté et masqué une donnée personnelle/secret (survol pour voir les catégories).
 
 **Bouton "Analyser avec le LLM"** : par défaut, Acteur/Contexte/Ressource/Risque/Objectif/Mission viennent de métadonnées techniques (en-têtes, IP, config), pas du sens du prompt. Ce bouton fait relire l'action par le LLM lui-même (même fournisseur/modèle que l'appel d'origine, réutilise `/v1/chat/completions`) pour en déduire ces 6 axes naturellement, à partir du sens réel de l'action — pas seulement de sa forme technique. Résultat affiché dans un panneau en bas à droite et injecté dans le graphe 3D (survoler les nœuds pour voir les nouvelles valeurs).
 

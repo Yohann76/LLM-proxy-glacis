@@ -86,9 +86,27 @@ Validé bout en bout avec un fournisseur mock : les 4 actions déclenchées sép
 
 ## Étape 4 — Détection & masquage PII/secrets
 
-- [ ] Détection des données personnelles et secrets dans les requêtes sortantes
-- [ ] Masquage dynamique (remplacement par variables anonymes)
-- [ ] Réinjection des vraies valeurs dans la réponse
+- [x] Détection des données personnelles et secrets dans les requêtes sortantes
+- [x] Masquage dynamique (remplacement par variables anonymes)
+- [x] Réinjection des vraies valeurs dans la réponse
+
+**Fait le 2026-09-14 (nuit).** Module `proxy/src/pii.rs`. Contrairement au moteur de règles (Étape 3, motifs écrits à la main dans `rules.yaml`), les catégories ici sont **intégrées et actives par défaut** — un filet de sécurité générique, pas une politique à configurer.
+
+Catégories détectées : `EMAIL`, `TELEPHONE`, `IBAN` (validé par checksum mod-97), `CARTE_BANCAIRE` (validée par checksum de Luhn — évite les faux positifs sur n'importe quelle longue suite de chiffres), `SECRET_API` (préfixes connus : `sk-`, `AKIA`, `ghp_`, `xox[baprs]-`). Regex précompilées une seule fois (`OnceLock`), pas par requête — même philosophie que le moteur de règles pour rester sous le budget de 5 ms.
+
+Fonctionnement :
+1. Chaque occurrence détectée est remplacée par une **variable anonyme numérotée** (`[EMAIL_1]`, `[SECRET_API_1]`, ...) — appliqué à l'axe Action (observabilité) et au corps réellement transféré au fournisseur, après le masquage éventuel de l'Étape 3.
+2. La correspondance placeholder → vraie valeur vit uniquement en mémoire locale le temps de la requête (jamais journalisée, jamais persistée).
+3. Si le fournisseur reprend un placeholder dans sa réponse, il est **réinjecté** (vraie valeur restituée) avant de renvoyer la réponse au client.
+4. Conséquence technique assumée : une requête avec réinjection ne peut plus être streamée en zero-copy (il faut bufferiser toute la réponse pour faire la substitution) — perte du streaming SSE token-par-token uniquement sur les appels concernés. Les appels sans PII détectée gardent le streaming intact.
+
+Toggle serveur uniquement : `PROXY_PII_MASKING=off` dans `.env` désactive la détection. **Volontairement non désactivable par le client** (pas d'en-tête `X-ProxyLLM-*` prévu pour ça) — sinon n'importe quel appelant pourrait contourner une protection de conformité d'un simple en-tête.
+
+Distinction importante avec l'Étape 3 : le masquage de règle (`rules.yaml`) est **statique et non réversible** (remplacement par un texte fixe, ex. `[EMAIL_MASQUE]`, aucune réinjection) — utile pour une rédaction permanente voulue par une politique. Le masquage PII de l'Étape 4 est **dynamique et réversible** — la valeur réelle revient dans la réponse. Les deux peuvent coexister sur un même appel sans conflit (numérotation de placeholders indépendante).
+
+**Visibilité dans l'interface (à l'endroit le plus approprié — pas de nouvelle page) :** badge **🔒 PII** dans la liste de `fourmi.html`, à côté de chaque appel où une catégorie a été détectée (survol = catégories concernées). L'axe **Risques** inclut aussi la mention (`"... ; PII detectee : SECRET_API"`), et l'axe **Réalisation** note le nombre de valeurs réinjectées. L'axe **Action** affiche directement le texte masqué (ex. `voici ma cle [SECRET_API_1]`) — preuve visuelle immédiate que la valeur brute n'a jamais transité telle quelle.
+
+Validé bout en bout avec un fournisseur mock qui journalise sur son propre stdout (jamais touché par la réinjection du proxy, donc preuve indépendante) : le fournisseur a bien reçu les placeholders (`[EMAIL_MASQUE]`, `[SECRET_API_1]`, `[IBAN_1]`, `[CARTE_BANCAIRE_1]`), jamais les vraies valeurs. Réinjection confirmée pour les catégories Étape 4 (secret, IBAN, carte) ; l'email resté masqué dans la réponse finale confirme le comportement non-réversible attendu de l'Étape 3. Faux positif évité sur un numéro à 16 chiffres ne passant pas Luhn. Latence mesurée avec les 3 catégories déclenchées dans un même appel : 3-4 ms.
 
 ## Étape 5 — Auditabilité & conformité AI Act
 

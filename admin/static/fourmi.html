@@ -67,17 +67,18 @@
     }
     .req-item:hover { background: #171a21; }
     .req-item.active { background: #171a21; border-left: 3px solid #3b6fe0; }
-    .req-item .top { display: flex; justify-content: space-between; color: #9aa2af; margin-bottom: .2rem; }
+    .req-item .top { display: flex; justify-content: flex-start; align-items: center; gap: .3rem; color: #9aa2af; margin-bottom: .2rem; }
+    .req-item .top span:first-child { margin-right: auto; }
     .req-item .action { color: #e6e6e6; font-family: ui-monospace, monospace; }
     .req-item .pill {
       display: inline-block;
       padding: .05rem .4rem;
       border-radius: 999px;
       font-size: .68rem;
-      margin-left: .3rem;
     }
     .pill.ok { background: #1f3b2c; color: #7ee787; }
     .pill.ko { background: #3b1f1f; color: #ff7b72; }
+    .pill.pii { background: #3b2f1f; color: #fbbf7e; }
 
     #graphWrap { flex: 1; position: relative; }
     #graph { width: 100%; height: 100%; }
@@ -156,7 +157,10 @@
         pour en déduire ces axes naturellement (double le nombre d'appels facturés pour cet
         appel — déclenché uniquement à la demande). <strong>Risque</strong> vient du vrai
         moteur de règles (<code>config/rules.yaml</code>, Étape 3) : bloqué/alerté/masqué/autorisé
-        selon les règles configurées. Étages relationnels <strong>Interaction</strong> et
+        selon les règles configurées. Le badge <strong>🔒 PII</strong> dans la liste signale une
+        détection automatique de données personnelles/secrets (Étape 4, intégré — email, IBAN,
+        carte bancaire, clé API...) : masqué avant envoi au fournisseur, réinjecté dans la
+        réponse renvoyée au client. Étages relationnels <strong>Interaction</strong> et
         <strong>Égrégore</strong> non modélisés (agrégation multi-appels non implémentée,
         §2–3 de Fourmi.md). <strong>Acteur induit</strong> non détecté (pas de règle dédiée
         pour l'instant).
@@ -345,8 +349,11 @@
       sidebar.innerHTML = requests.map((u) => {
         const ok = u.logs.status < 400;
         const t = new Date(u.timestamp_unix_ms).toLocaleTimeString('fr-FR');
+        const piiBadge = u.pii_masked
+          ? `<span class="pill pii" title="PII/secrets détectés et masqués : ${escapeHtml((u.pii_categories || []).join(', '))}">🔒 PII</span>`
+          : '';
         return `<div class="req-item ${u.request_id === activeId ? 'active' : ''}" data-id="${u.request_id}">
-          <div class="top"><span>${t}</span><span class="pill ${ok ? 'ok' : 'ko'}">${u.logs.status}</span></div>
+          <div class="top"><span>${t}</span><span class="pill ${ok ? 'ok' : 'ko'}">${u.logs.status}</span>${piiBadge}</div>
           <div class="action">${escapeHtml(truncate(u.action || (u.logs.method + ' ' + u.logs.path), 34))}</div>
           <div>${escapeHtml(truncate(u.mission, 30))}</div>
         </div>`;

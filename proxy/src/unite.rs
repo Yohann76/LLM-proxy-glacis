@@ -39,9 +39,10 @@ pub struct UniteRecord {
     pub timestamp_unix_ms: u128,
 
     /// Verbe + objet de l'intention réelle, extrait du dernier message
-    /// utilisateur du prompt (voir `extract_action` dans main.rs). Peut
-    /// contenir des données sensibles saisies par l'utilisateur : aucun
-    /// masquage PII n'existe encore (Étape 4 de la roadmap).
+    /// utilisateur du prompt (voir `extract_action` dans main.rs). Déjà
+    /// masqué (Étape 3 + Étape 4) au moment où l'unité est construite : ce
+    /// qui apparaît ici est ce qui a été réellement envoyé au fournisseur,
+    /// jamais le texte brut si une règle ou une détection PII a matché.
     pub action: String,
     pub acteur: String,
     pub contexte: String,
@@ -52,6 +53,13 @@ pub struct UniteRecord {
     pub realisation: String,
     pub objectif: String,
     pub mission: String,
+
+    /// Étape 4 : au moins une donnée personnelle/secret détectée et
+    /// masquée dans cet appel (indépendamment des règles de l'Étape 3).
+    pub pii_masked: bool,
+    /// Catégories détectées (ex. "EMAIL", "SECRET_API") — vide si
+    /// `pii_masked` est faux.
+    pub pii_categories: Vec<String>,
 }
 
 pub fn now_unix_ms() -> u128 {
@@ -155,7 +163,9 @@ async fn export_otlp(
                         { "key": "proxyllm.mission", "value": { "stringValue": record.mission.clone() } },
                         { "key": "http.method", "value": { "stringValue": record.logs.method.clone() } },
                         { "key": "http.target", "value": { "stringValue": record.logs.path.clone() } },
-                        { "key": "http.status_code", "value": { "intValue": record.logs.status.to_string() } }
+                        { "key": "http.status_code", "value": { "intValue": record.logs.status.to_string() } },
+                        { "key": "proxyllm.pii_masked", "value": { "boolValue": record.pii_masked } },
+                        { "key": "proxyllm.pii_categories", "value": { "stringValue": record.pii_categories.join(",") } }
                     ],
                     "status": { "code": status_code_otlp }
                 }]

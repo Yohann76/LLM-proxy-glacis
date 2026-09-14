@@ -1,3 +1,4 @@
+mod pii;
 mod rules;
 mod unite;
 
@@ -32,6 +33,7 @@ struct AppState {
     http: reqwest::Client,
     unites: Store,
     rule_engine: rules::RuleEngine,
+    pii_masking_enabled: bool,
 }
 
 #[tokio::main]
@@ -62,11 +64,24 @@ async fn main() {
     let rule_engine = rules::RuleEngine::load_initial(rules_path.into());
     rule_engine.spawn_watcher(std::time::Duration::from_secs(2));
 
+    // Détection & masquage PII/secrets (Étape 4) : actif par défaut,
+    // désactivable UNIQUEMENT côté serveur — jamais par un en-tête client,
+    // pour qu'une protection de conformité ne puisse pas être contournée
+    // simplement par qui appelle le proxy.
+    let pii_masking_enabled = std::env::var("PROXY_PII_MASKING")
+        .map(|v| !matches!(v.to_lowercase().as_str(), "off" | "false" | "0"))
+        .unwrap_or(true);
+    println!(
+        "Détection/masquage PII & secrets : {}",
+        if pii_masking_enabled { "actif" } else { "désactivé (PROXY_PII_MASKING)" }
+    );
+
     let state = AppState {
         config: Arc::new(config),
         http: reqwest::Client::new(),
         unites: Store::new(),
         rule_engine,
+        pii_masking_enabled,
     };
 
     let app = Router::new()
@@ -250,6 +265,8 @@ async fn passthrough(
             request_bytes,
             risques.clone(),
             format!("bloque par la regle '{rule_name}'"),
+            false,
+            Vec::new(),
         );
         return (
             StatusCode::FORBIDDEN,
@@ -258,10 +275,11 @@ async fn passthrough(
             .into_response();
     }
 
-    // "Masquer" : appliqué à la fois sur l'axe Action (ce qui est journalisé
-    // / affiché) et sur le corps forwardé au fournisseur — sinon on
-    // masquerait l'observabilité sans masquer ce qui part réellement chez
-    // le tiers, ce qui serait pire qu'inutile.
+    // "Masquer" (Étape 3, règles écrites à la main) : appliqué à la fois sur
+    // l'axe Action (ce qui est journalisé / affiché) et sur le corps
+    // forwardé au fournisseur — sinon on masquerait l'observabilité sans
+    // masquer ce qui part réellement chez le tiers, ce qui serait pire
+    // qu'inutile.
     let (action, body) = if decision.has_masks() {
         let masked_action = decision.apply_masks(&action);
         let masked_body = match std::str::from_utf8(&body) {
@@ -271,6 +289,34 @@ async fn passthrough(
         (masked_action, masked_body)
     } else {
         (action, body)
+    };
+
+    // Détection & masquage PII/secrets (Étape 4, intégré — pas besoin
+    // d'écrire une règle). `pii_mapping` (placeholder → vraie valeur) ne
+    // sert qu'à la réinjection dans la réponse ci-dessous : jamais
+    // persisté, jamais journalisé.
+    let (action, _) = if state.pii_masking_enabled {
+        let masked = pii::mask(&action);
+        (masked.text, masked.mapping)
+    } else {
+        (action, HashMap::new())
+    };
+    let (body, pii_mapping, pii_categories) = if state.pii_masking_enabled {
+        match std::str::from_utf8(&body) {
+            Ok(text) => {
+                let masked = pii::mask(text);
+                (Bytes::from(masked.text), masked.mapping, masked.categories)
+            }
+            Err(_) => (body, HashMap::new(), Vec::new()),
+        }
+    } else {
+        (body, HashMap::new(), Vec::new())
+    };
+    let pii_masked = !pii_categories.is_empty();
+    let risques = if pii_categories.is_empty() {
+        risques
+    } else {
+        format!("{risques} ; PII detectee : {}", pii_categories.join(", "))
     };
 
     let Some(provider) = state.config.providers.get(&provider_name) else {
@@ -291,6 +337,8 @@ async fn passthrough(
             request_bytes,
             risques,
             "fournisseur inconnu".to_string(),
+            pii_masked,
+            pii_categories,
         );
         return (
             StatusCode::BAD_GATEWAY,
@@ -325,6 +373,8 @@ async fn passthrough(
                     request_bytes,
                     risques,
                     "clé API manquante".to_string(),
+                    pii_masked,
+                    pii_categories,
                 );
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -386,6 +436,8 @@ async fn passthrough(
                 request_bytes,
                 risques,
                 format!("erreur fournisseur : {e}"),
+                pii_masked,
+                pii_categories,
             );
             return (StatusCode::BAD_GATEWAY, format!("erreur fournisseur : {e}")).into_response();
         }
@@ -404,6 +456,14 @@ async fn passthrough(
         )
     } else {
         format!("erreur http {}", status.as_u16())
+    };
+    let realisation = if pii_mapping.is_empty() {
+        realisation
+    } else {
+        format!(
+            "{realisation} ; {} valeur(s) PII reinjectee(s) dans la reponse",
+            pii_mapping.len()
+        )
     };
 
     let mut out_headers = HeaderMap::new();
@@ -431,10 +491,36 @@ async fn passthrough(
         request_bytes,
         risques,
         realisation,
+        pii_masked,
+        pii_categories,
     );
 
-    let stream = resp.bytes_stream();
-    (status, out_headers, Body::from_stream(stream)).into_response()
+    // Réinjection (Étape 4) : si des PII ont été masquées dans la requête,
+    // on ne peut plus streamer tel quel la réponse — il faut la bufferiser
+    // entièrement pour substituer les placeholders par les vraies valeurs
+    // avant de la renvoyer au client. Compromis assumé : pas de streaming
+    // SSE token-par-token sur les appels où une réinjection est nécessaire.
+    // Sans PII détectée (cas normal), le streaming zero-copy reste intact.
+    if pii_mapping.is_empty() {
+        let stream = resp.bytes_stream();
+        (status, out_headers, Body::from_stream(stream)).into_response()
+    } else {
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("erreur de lecture de la réponse fournisseur : {e}"),
+                )
+                    .into_response()
+            }
+        };
+        let reinjected = match std::str::from_utf8(&bytes) {
+            Ok(text) => Bytes::from(pii::reinject(text, &pii_mapping)),
+            Err(_) => bytes,
+        };
+        (status, out_headers, Body::from(reinjected)).into_response()
+    }
 }
 
 /// Best-effort : tente d'extraire le champ "model" du corps JSON de la
@@ -451,9 +537,8 @@ fn extract_model(body: &Bytes) -> Option<String> {
 /// l'axe Action, conformément à la méthode Fourmi (verbe + objet de
 /// l'action réelle, cf. Docs/Fourmi.md §1.1).
 ///
-/// ⚠️ Peut donc contenir des données saisies par l'utilisateur, potentiellement
-/// sensibles. Aucun masquage PII n'existe encore (Étape 4 de la roadmap) :
-/// c'est un compromis assumé en attendant, pas un oubli. Retombe sur
+/// ⚠️ Extrait ici en clair : le masquage (Étape 3 puis Étape 4) est
+/// appliqué juste après, plus loin dans `passthrough`. Retombe sur
 /// "méthode + chemin" si le corps n'est pas exploitable (ex. requêtes GET,
 /// formats d'API non conversationnels).
 fn extract_action(body: &Bytes, method: &str, path: &str) -> String {
@@ -517,6 +602,8 @@ fn emit_unite(
     request_bytes: usize,
     risques: String,
     realisation: String,
+    pii_masked: bool,
+    pii_categories: Vec<String>,
 ) {
     let record = UniteRecord {
         request_id,
@@ -537,6 +624,8 @@ fn emit_unite(
         realisation,
         objectif,
         mission,
+        pii_masked,
+        pii_categories,
     };
 
     let http = state.http.clone();
