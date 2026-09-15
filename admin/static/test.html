@@ -98,19 +98,61 @@
     .bubble-row.assistant .bubble.error { border-color: #7a2f2f; color: #ff9d9d; }
     .bubble-row.assistant .bubble.loading { color: #9aa2af; }
 
-    .meta-line {
+    .meta-footer {
       margin-top: .35rem;
       display: flex;
-      gap: .5rem;
-      font-size: .7rem;
-      color: #9aa2af;
-      flex-wrap: wrap;
+      align-items: center;
+      gap: .7rem;
+      justify-content: flex-end;
     }
-    .meta-line .pill { padding: .1rem .45rem; border-radius: 999px; background: #1c1f27; }
-    .meta-line .pill.ok { color: #7ee787; }
-    .meta-line .pill.ko { color: #ff7b72; }
-    .meta-line a { color: #7aa2f7; cursor: pointer; text-decoration: none; }
-    .meta-line a:hover { text-decoration: underline; }
+    .meta-footer a { color: #7aa2f7; font-size: .72rem; cursor: pointer; text-decoration: none; }
+    .meta-footer a:hover { text-decoration: underline; }
+
+    .info-icon {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #1c1f27;
+      border: 1px solid #262a33;
+      color: #9aa2af;
+      font-size: .66rem;
+      font-style: italic;
+      font-family: Georgia, 'Times New Roman', serif;
+      cursor: default;
+      user-select: none;
+    }
+    .info-icon:hover, .info-icon:focus { background: #262a33; color: #e6e6e6; outline: none; }
+    .info-icon .tooltip {
+      position: absolute;
+      bottom: 135%;
+      right: -6px;
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: .55rem .7rem;
+      font-size: .72rem;
+      white-space: nowrap;
+      box-shadow: 0 6px 20px rgba(0,0,0,.45);
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(4px);
+      transition: opacity .12s ease, transform .12s ease;
+      z-index: 20;
+    }
+    .info-icon:hover .tooltip, .info-icon:focus .tooltip {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+    .tooltip .row { display: flex; justify-content: space-between; gap: 1.2rem; padding: .12rem 0; }
+    .tooltip .row .label { color: #9aa2af; }
+    .tooltip .row .value { font-family: ui-monospace, monospace; color: #e6e6e6; font-weight: 600; }
+    .tooltip .row .value.ok { color: #7ee787; }
+    .tooltip .row .value.ko { color: #ff7b72; }
     .raw {
       margin-top: .4rem;
       background: #0c0e12;
@@ -223,30 +265,58 @@
       return { row, bubble };
     }
 
+    function metaRow(label, value, cls) {
+      return `<div class="row"><span class="label">${label}</span><span class="value${cls ? ' ' + cls : ''}">${value}</span></div>`;
+    }
+
+    // Métadonnées masquées par défaut, visibles uniquement au survol (ou au
+    // focus clavier) d'une petite icône ⓘ — priorité à la place laissée au
+    // texte de la réponse plutôt qu'à une barre de stats toujours affichée.
     function setMeta(row, { status, latencyMs, usage, model, rawText }) {
-      const meta = document.createElement('div');
-      meta.className = 'meta-line';
       const ok = status >= 200 && status < 300;
-      const parts = [`<span class="pill ${ok ? 'ok' : 'ko'}">HTTP ${status}</span>`];
-      if (latencyMs != null) parts.push(`<span class="pill">${latencyMs} ms</span>`);
-      if (model) parts.push(`<span class="pill">${escapeHtml(model)}</span>`);
+      const rows = [metaRow('Statut', status, ok ? 'ok' : 'ko')];
+      if (latencyMs != null) rows.push(metaRow('Latence', `${latencyMs} ms`));
+      if (model) rows.push(metaRow('Modèle', escapeHtml(model)));
       if (usage) {
         const { prompt_tokens: p, completion_tokens: c, total_tokens: t } = usage;
-        if (t != null) parts.push(`<span class="pill">${t} tokens${p != null && c != null ? ` (${p}+${c})` : ''}</span>`);
+        if (p != null) rows.push(metaRow('Prompt', p.toLocaleString('fr-FR')));
+        if (c != null) rows.push(metaRow('Complétion', c.toLocaleString('fr-FR')));
+        if (t != null) rows.push(metaRow('Total tokens', t.toLocaleString('fr-FR')));
       }
-      if (rawText) parts.push('<a data-toggle-raw>voir la réponse brute</a>');
-      meta.innerHTML = parts.join('');
-      row.appendChild(meta);
+
+      const footer = document.createElement('div');
+      footer.className = 'meta-footer';
+
+      const icon = document.createElement('span');
+      icon.className = 'info-icon';
+      icon.tabIndex = 0;
+      icon.textContent = 'i';
+      const tooltip = document.createElement('div');
+      tooltip.className = 'tooltip';
+      tooltip.innerHTML = rows.join('');
+      icon.appendChild(tooltip);
+      footer.appendChild(icon);
 
       if (rawText) {
+        const link = document.createElement('a');
+        link.textContent = 'brute';
+        footer.appendChild(link);
+
         const raw = document.createElement('div');
         raw.className = 'raw';
         raw.textContent = rawText;
-        row.appendChild(raw);
-        meta.querySelector('[data-toggle-raw]').addEventListener('click', () => {
-          raw.style.display = raw.style.display === 'block' ? 'none' : 'block';
+
+        link.addEventListener('click', () => {
+          const opening = raw.style.display !== 'block';
+          raw.style.display = opening ? 'block' : 'none';
+          link.textContent = opening ? 'masquer' : 'brute';
           chatEl.scrollTop = chatEl.scrollHeight;
         });
+
+        row.appendChild(footer);
+        row.appendChild(raw);
+      } else {
+        row.appendChild(footer);
       }
     }
 
