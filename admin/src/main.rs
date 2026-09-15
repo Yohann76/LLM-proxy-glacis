@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,10 @@ async fn main() {
         .route("/api/rules/test", post(api_rules_test))
         .route("/api/compliance-report", get(api_compliance_report))
         .route("/api/chargeback", get(api_chargeback))
+        .route("/api/fallback", get(api_fallback))
+        .route("/api/providers", get(api_providers))
+        .route("/api/virtual-keys", post(api_create_virtual_key))
+        .route("/api/virtual-keys/:id", delete(api_delete_virtual_key))
         .fallback_service(ServeDir::new("static").append_index_html_on_directories(true))
         .with_state(state);
 
@@ -396,6 +400,105 @@ async fn api_chargeback(State(state): State<AppState>) -> impl IntoResponse {
             )
                 .into_response(),
         },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Relaie l'introspection du fallback (`GET /internal/fallback` côté
+/// proxy) pour la vue "Fournisseurs" de l'admin.
+async fn api_fallback(State(state): State<AppState>) -> impl IntoResponse {
+    let url = format!("{}/internal/fallback", state.proxy_url.trim_end_matches('/'));
+    match state.http.get(&url).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("réponse du proxy illisible : {e}"),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Relaie l'introspection des fournisseurs (`GET /internal/providers` côté
+/// proxy) pour la vue "Fournisseurs" de l'admin.
+async fn api_providers(State(state): State<AppState>) -> impl IntoResponse {
+    let url = format!("{}/internal/providers", state.proxy_url.trim_end_matches('/'));
+    match state.http.get(&url).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("réponse du proxy illisible : {e}"),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Crée une clé virtuelle (`POST /internal/virtual-keys` côté proxy) —
+/// Étape 8, "gestion des accès". La réponse contient la clé en clair : ne
+/// transite qu'ici, une seule fois, jamais stockée côté admin.
+async fn api_create_virtual_key(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let url = format!("{}/internal/virtual-keys", state.proxy_url.trim_end_matches('/'));
+    match state.http.post(&url).json(&body).send().await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            match resp.text().await {
+                Ok(text) => (status, [(axum::http::header::CONTENT_TYPE, "application/json")], text)
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    format!("réponse du proxy illisible : {e}"),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Révoque une clé virtuelle par son `id` non secret (`DELETE
+/// /internal/virtual-keys/:id` côté proxy).
+async fn api_delete_virtual_key(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let url = format!(
+        "{}/internal/virtual-keys/{id}",
+        state.proxy_url.trim_end_matches('/')
+    );
+    match state.http.delete(&url).send().await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            match resp.text().await {
+                Ok(text) => (status, [(axum::http::header::CONTENT_TYPE, "application/json")], text)
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::BAD_GATEWAY,
+                    format!("réponse du proxy illisible : {e}"),
+                )
+                    .into_response(),
+            }
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             format!("erreur de connexion au proxy : {e}"),

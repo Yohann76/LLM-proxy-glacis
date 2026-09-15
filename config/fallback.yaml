@@ -1,0 +1,19 @@
+# Fallback / Failover entre fournisseurs — Étape 7, cf. Docs/cahier-des-charges.md §3.4.
+#
+# Si l'appel au fournisseur primaire échoue (erreur réseau, erreur serveur
+# 5xx, ou pas de réponse dans le délai `timeout_ms`), le proxy bascule
+# automatiquement vers le fournisseur/modèle de repli configuré ci-dessous —
+# une seule tentative de repli (pas de cascade), pour rester simple.
+#
+# ⚠️ `timeout_ms` borne uniquement l'attente de la RÉPONSE INITIALE (les
+# en-têtes), jamais la lecture du corps en streaming : une complétion
+# longue mais qui répond normalement n'est jamais interrompue.
+#
+# Fichier surveillé et rechargé à chaud (~2s), comme rules.yaml.
+
+timeout_ms: 10000
+
+chains:
+  - primary_provider: "openai"
+    fallback_provider: "mistral"
+    fallback_model: "mistral-small-latest"

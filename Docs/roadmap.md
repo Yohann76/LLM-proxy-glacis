@@ -144,11 +144,29 @@ Validé bout en bout : 5 requêtes de test (1 bloquée, 1 alerte, 1 avec PII/sec
 
 Validé bout en bout avec un mock retournant un vrai champ `usage` : sans clé → 401 ; clé invalide → 401 ; bonne clé → 200 + acteur = nom de la clé ; quota de 30 tokens consommé sur 2 appels (15 chacun) → 3e appel bloqué (403, "30/30 tokens") ; chargeback exact (50 % puis 100 %, coût estimé correct) ; persistance confirmée après redémarrage.
 
+**Correction du 2026-09-15 : clé toujours facultative, plus jamais de 401.** Retour utilisateur après usage réel : le 401 "clé invalide ou absente" ci-dessus a été retiré — une clé virtuelle identifie et rattache un appel à un quota/chargeback, elle ne conditionne plus jamais l'accès. Nouveau comportement : appel sans clé (ou clé non reconnue) → passe normalement ; Acteur = `"Équipe inconnue"` si au moins une clé existe quelque part dans `virtual_keys.yaml` (sinon Acteur reste dérivé de l'IP/en-tête, comme avant cette étape). Pas de quota appliqué aux appels non rattachés — logique, puisqu'ils n'appartiennent à aucune clé. `VirtualKeyStore::is_enforced` renommé `has_keys` (ne conditionne plus un blocage, juste un affichage) ; le champ JSON `"enforced"` de `/internal/chargeback` devient `"has_keys"`. Bandeau `finops.html` mis à jour en conséquence (retrait de tout vocabulaire "authentification requise"/"proxy fermé"). Revalidé : appel sans clé avec 2 clés configurées → `200`/`500` selon la clé fournisseur (jamais `401`), Acteur = "Équipe inconnue" confirmé dans l'unité d'observabilité ; appel avec clé valide → toujours rattaché à son équipe normalement.
+
 ## Étape 7 — Fallback / Failover
 
-- [ ] Détection de panne/latence d'un fournisseur
-- [ ] Bascule automatique vers un fournisseur/modèle équivalent
-- [ ] Configuration des correspondances de modèles
+- [x] Détection de panne/latence d'un fournisseur
+- [x] Bascule automatique vers un fournisseur/modèle équivalent
+- [x] Configuration des correspondances de modèles
+
+**Fait le 2026-09-15.** Module `proxy/src/fallback.rs`. Fichier `config/fallback.yaml` (même schéma hot-reload ~2s que `rules.yaml`) : `timeout_ms` global + liste de correspondances `primary_provider[/primary_model] → fallback_provider[/fallback_model]`.
+
+**Détection** — deux critères, une seule tentative de repli (pas de cascade) :
+- erreur réseau ou statut serveur (5xx) du fournisseur primaire ;
+- pas de réponse dans `timeout_ms`.
+
+⚠️ Décision de conception importante : le timeout est implémenté avec `tokio::time::timeout` autour du seul `req.send()` (attente des en-têtes), **jamais** autour de la lecture du corps de la réponse. Une complétion longue mais qui répond normalement (streaming) n'est donc jamais interrompue — seule l'absence de réponse initiale compte comme panne. (`reqwest`'s propre `.timeout()` sur le builder aurait aussi borné la lecture du corps, ce qui aurait cassé le streaming long — volontairement pas utilisé pour cette raison.)
+
+**Bascule** : au déclenchement, le proxy retente immédiatement la même requête vers `fallback_provider`, avec substitution du champ `"model"` du corps JSON si `fallback_model` est renseigné (sinon le modèle demandé est conservé tel quel). La clé du fournisseur de repli vient toujours de son `api_key_env` (jamais de la surcharge `X-ProxyLLM-Api-Key` du client, qui visait explicitement le fournisseur primaire).
+
+**Visibilité** : l'axe Ressource reflète le fournisseur/modèle qui a réellement servi la réponse (pas celui demandé au départ) ; l'axe Réalisation documente la bascule et sa cause (`"succes (...) ; bascule openai -> mistral (erreur serveur 503)"` ou `"... (panne/latence : délai dépassé (...) en attente d'une réponse)"`) — visible directement dans `fourmi.html`, aucune nouvelle vue dédiée nécessaire pour ça.
+
+Validé bout en bout avec des fournisseurs mock temporaires : bascule sur 5xx confirmée (modèle de repli utilisé, reçu par le vrai mock cible) ; bascule sur timeout confirmée (réponse en ~1s malgré un fournisseur primaire qui met 3s, avec le timeout réduit à 1s pour le test) ; axe Ressource et Réalisation corrects dans les deux cas.
+
+- [x] Vue Fournisseurs (`providers.html`) : liste des fournisseurs (URL, variable de clé, clé définie ou non — jamais la valeur) + correspondances de fallback affichées côte à côte, conformément à l'intitulé de l'Étape 8 ("config LLM + fallback"). `GET /internal/providers` et `GET /internal/fallback` côté proxy, relayés par l'admin.
 
 ## Étape 8 — Interface admin (dashboard)
 
@@ -156,8 +174,23 @@ Validé bout en bout avec un mock retournant un vrai champ `usage` : sans clé �
 - [x] Vue Observabilité (exploration des séquences par la grille Unité) — fusionnée dans la vue Fourmi 3D, voir plus bas
 - [x] Vue Compliance (génération/téléchargement des rapports) — `compliance.html` (cf. Étape 5)
 - [x] Vue FinOps (coûts, quotas, alertes) — `finops.html` (cf. Étape 6)
-- [ ] Vue Fournisseurs (config LLM + fallback)
-- [ ] Gestion des accès (clés API virtuelles)
+- [x] Vue Fournisseurs (config LLM + fallback) — `providers.html` (cf. Étape 7)
+- [x] Gestion des accès (clés API virtuelles)
+
+**Fait le 2026-09-15.** `finops.html` gagne un formulaire de création (nom, quota optionnel, taux de chargeback optionnel) et un bouton "Révoquer" par carte — la première fonctionnalité d'**écriture** dans l'admin (tout le reste était lecture/test seul jusqu'ici). Nouveaux endpoints `POST /internal/virtual-keys` et `DELETE /internal/virtual-keys/:id` côté proxy, relayés par l'admin.
+
+Trois décisions de conception à retenir :
+- **La clé est générée côté serveur** (jamais choisie par l'admin) — réutilise `uuid`, déjà une dépendance, pas de nouvelle lib. Évite les clés faibles/devinables.
+- **Champ `id` non secret, distinct de `key`** — ajouté à `VirtualKeyConfig`. Le rapport chargeback expose `id` (sert à cibler une révocation) mais jamais `key`. Nécessaire : sans un identifiant séparé, cibler une révocation depuis l'UI aurait exigé d'exposer la clé brute quelque part après coup, ce qu'on s'interdit depuis l'Étape 6. `id` et `key` sont deux valeurs aléatoires indépendantes — exposer `id` ne renseigne rien sur `key`.
+- **La clé brute n'est renvoyée qu'à l'instant de la création**, jamais re-consultable ensuite (ni par un endpoint, ni dans une vue) — même logique que GitHub/AWS/Stripe pour leurs clés d'API. `finops.html` l'affiche une fois dans un bandeau avec avertissement, à copier immédiatement.
+
+**Écriture persistée** : `config/virtual_keys.yaml` passe d'un montage `:ro` à un montage dédié en lecture-écriture pour CE fichier précis seulement (`docker-compose.yml` : mount spécifique `./config/virtual_keys.yaml:/app/config/virtual_keys.yaml`, qui prend le pas sur le `:ro` du dossier parent) — tous les autres fichiers de config (`providers.yaml`, `rules.yaml`, `fallback.yaml`) restent en lecture seule. Les créations/révocations réutilisent le mécanisme de rechargement à chaud déjà en place : pas de nouveau système de persistance.
+
+⚠️ Note mineure : `serde_yaml` régénère le fichier sans préserver les commentaires existants lors d'une écriture — les commentaires d'en-tête du fichier ont été réécrits pour documenter ça.
+
+Validé bout en bout via l'admin (pas juste le proxy directement) : création → écriture sur disque confirmée (id stable, clé au format `vk-<32 hex>`) → clé fonctionnelle immédiatement → révocation par id → fichier mis à jour → clé non reconnue immédiatement après.
+
+*(Mise à jour du 2026-09-15 : depuis la correction "clé toujours facultative" ci-dessus, une clé révoquée/inconnue ne renvoie plus 401 — l'appel passe, rattaché à "Équipe inconnue", comme n'importe quel appel sans clé. Revalidé.)*
 
 **Vue Observabilité faite le 2026-09-14, supprimée le 2026-09-14 (nuit).** `admin/static/observability.html` (tableau des dernières unités) faisait doublon avec la liste latérale de la vue Fourmi 3D (mêmes données, via `GET /api/observability`). Retirée du dashboard et du disque à la demande de l'utilisateur ; seule la vue Fourmi 3D subsiste comme point d'entrée Observabilité.
 

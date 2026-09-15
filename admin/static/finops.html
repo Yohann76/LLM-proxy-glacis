@@ -85,6 +85,60 @@
     .bar-fill.exceeded { background: #ff7b72; }
 
     .empty { color: #9aa2af; font-size: .9rem; padding: 2rem; text-align: center; border: 1px dashed #262a33; border-radius: 8px; }
+
+    .create-form {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1.1rem 1.3rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      gap: .8rem;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .create-form label { display: block; font-size: .72rem; color: #9aa2af; margin-bottom: .25rem; }
+    .create-form input {
+      background: #0c0e12;
+      border: 1px solid #262a33;
+      border-radius: 6px;
+      color: #e6e6e6;
+      padding: .45rem .6rem;
+      font-size: .82rem;
+    }
+    #fName { width: 180px; }
+    #fQuota { width: 130px; }
+    #fCost { width: 110px; }
+
+    .revoke-btn {
+      background: transparent;
+      border: 1px solid #3b1f1f;
+      color: #ff7b72;
+      padding: .3rem .7rem;
+      font-size: .72rem;
+    }
+    .revoke-btn:hover { background: #3b1f1f; }
+
+    .new-key-banner {
+      background: #1f3b2c;
+      border: 1px solid #2f5c40;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      margin-bottom: 1.5rem;
+      display: none;
+    }
+    .new-key-banner .value {
+      font-family: ui-monospace, monospace;
+      font-size: .95rem;
+      background: #0c0e12;
+      padding: .5rem .7rem;
+      border-radius: 6px;
+      margin: .5rem 0;
+      word-break: break-all;
+      user-select: all;
+    }
+    .new-key-banner p { margin: .3rem 0; font-size: .8rem; }
+    .new-key-banner .warn { color: #fbbf7e; }
   </style>
 </head>
 <body>
@@ -97,6 +151,28 @@
   </header>
 
   <main>
+    <div id="newKeyBanner" class="new-key-banner">
+      <p><strong>Clé créée</strong> — copie-la maintenant, elle ne sera plus jamais affichée en clair :</p>
+      <div class="value" id="newKeyValue"></div>
+      <p class="warn">⚠️ Page en HTTP simple sur une IP publique : transite en clair sur le réseau.</p>
+    </div>
+
+    <div class="create-form">
+      <div>
+        <label for="fName">Nom (équipe/projet)</label>
+        <input id="fName" placeholder="ex: Équipe Support" />
+      </div>
+      <div>
+        <label for="fQuota">Quota (tokens, optionnel)</label>
+        <input id="fQuota" type="number" min="0" placeholder="illimité" />
+      </div>
+      <div>
+        <label for="fCost">$ / 1k tokens (optionnel)</label>
+        <input id="fCost" type="number" min="0" step="0.0001" placeholder="—" />
+      </div>
+      <button id="create">Créer une clé</button>
+    </div>
+
     <div id="statusBanner" class="status-banner open">Chargement…</div>
     <div id="content"></div>
   </main>
@@ -130,7 +206,10 @@
       return `<div class="key-card">
         <div class="top">
           <h2>${escapeHtml(k.name)}</h2>
-          ${statusBadge}
+          <div style="display:flex;gap:.5rem;align-items:center;">
+            ${statusBadge}
+            <button class="revoke-btn" data-id="${escapeHtml(k.id)}" data-name="${escapeHtml(k.name)}">Révoquer</button>
+          </div>
         </div>
         <div class="masked">${escapeHtml(k.key_masked)}</div>
         ${bar}
@@ -153,12 +232,12 @@
         const res = await fetch('/api/chargeback');
         const data = await res.json();
 
-        if (data.enforced) {
+        if (data.has_keys) {
           banner.className = 'status-banner closed';
-          banner.textContent = '🔒 Authentification requise : le proxy exige une clé virtuelle valide (Authorization: Bearer <clé>) sur /v1/*.';
+          banner.textContent = 'ℹ️ Suivi par équipe actif : les appels avec une clé (Authorization: Bearer <clé>) sont rattachés à leur équipe ci-dessous. Les appels sans clé passent normalement, comptabilisés à part sous « Équipe inconnue » (jamais bloqués).';
         } else {
           banner.className = 'status-banner open';
-          banner.textContent = 'ℹ️ Aucune clé virtuelle configurée dans config/virtual_keys.yaml — le proxy reste ouvert (pas d\'authentification requise). Ajoute des clés dans ce fichier pour activer le contrôle d\'accès et le suivi FinOps.';
+          banner.textContent = 'ℹ️ Aucune clé virtuelle configurée — crée-en une ci-dessous pour commencer à suivre la consommation par équipe. Les clés sont toujours facultatives : le proxy ne bloque jamais un appel pour absence de clé.';
         }
 
         if (!data.keys || data.keys.length === 0) {
@@ -166,11 +245,66 @@
           return;
         }
         content.innerHTML = data.keys.map(keyCard).join('');
+
+        content.querySelectorAll('.revoke-btn').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            if (!confirm(`Révoquer la clé « ${btn.dataset.name} » ? Cette action est irréversible.`)) return;
+            btn.disabled = true;
+            btn.textContent = '…';
+            try {
+              const res = await fetch(`/api/virtual-keys/${encodeURIComponent(btn.dataset.id)}`, { method: 'DELETE' });
+              if (!res.ok) throw new Error(await res.text());
+              await load();
+            } catch (e) {
+              alert('Échec de la révocation : ' + e);
+              btn.disabled = false;
+              btn.textContent = 'Révoquer';
+            }
+          });
+        });
       } catch (e) {
         banner.className = 'status-banner closed';
         banner.textContent = 'Erreur réseau : ' + e;
       }
     }
+
+    $('create').addEventListener('click', async () => {
+      const name = $('fName').value.trim();
+      if (!name) { alert('Le nom est requis.'); return; }
+
+      const quotaRaw = $('fQuota').value.trim();
+      const costRaw = $('fCost').value.trim();
+      const payload = {
+        name,
+        quota_tokens: quotaRaw ? parseInt(quotaRaw, 10) : null,
+        cost_per_1k_tokens: costRaw ? parseFloat(costRaw) : null,
+      };
+
+      const btn = $('create');
+      btn.disabled = true;
+      btn.textContent = 'Création…';
+      try {
+        const res = await fetch('/api/virtual-keys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const created = await res.json();
+
+        $('newKeyValue').textContent = created.key;
+        $('newKeyBanner').style.display = 'block';
+        $('fName').value = '';
+        $('fQuota').value = '';
+        $('fCost').value = '';
+        await load();
+      } catch (e) {
+        alert('Échec de la création : ' + e);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Créer une clé';
+      }
+    });
 
     $('refresh').addEventListener('click', load);
     load();

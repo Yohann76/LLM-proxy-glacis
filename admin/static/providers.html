@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — Fournisseurs</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #262a33;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header a { color: #7aa2f7; font-size: .85rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    .toolbar { margin-left: auto; }
+    button {
+      background: #3b6fe0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: .45rem 1.1rem;
+      font-size: .8rem;
+      cursor: pointer;
+    }
+    button:hover { background: #4c7cf0; }
+
+    main { max-width: 960px; margin: 0 auto; padding: 2rem; display: flex; flex-direction: column; gap: 2rem; }
+    section h2 { font-size: 1rem; margin: 0 0 .8rem; }
+    p.hint { color: #9aa2af; font-size: .8rem; margin: -.5rem 0 1rem; }
+
+    .provider-card {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      margin-bottom: .8rem;
+    }
+    .provider-card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+    .provider-card h3 { margin: 0; font-size: .95rem; font-family: ui-monospace, monospace; }
+    .provider-card .url { color: #9aa2af; font-size: .78rem; font-family: ui-monospace, monospace; margin-top: .3rem; }
+    .badge { font-size: .68rem; padding: .15rem .55rem; border-radius: 999px; font-weight: 600; text-transform: uppercase; }
+    .badge.default { background: #1f2c3b; color: #7ec3ff; }
+    .badge.key-ok { background: #1f3b2c; color: #7ee787; }
+    .badge.key-missing { background: #3b1f1f; color: #ff7b72; }
+
+    .chain-card {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: .9rem 1.2rem;
+      margin-bottom: .7rem;
+      font-size: .85rem;
+      display: flex;
+      align-items: center;
+      gap: .6rem;
+      flex-wrap: wrap;
+    }
+    .chain-card .arrow { color: #9aa2af; }
+    .chain-card code { background: #0c0e12; padding: .1rem .4rem; border-radius: 4px; }
+    .empty { color: #9aa2af; font-size: .85rem; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Fournisseurs & Fallback</h1>
+    <a href="/">&larr; dashboard</a>
+    <div class="toolbar">
+      <button id="refresh">Actualiser</button>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Fournisseurs configurés</h2>
+      <p class="hint">Depuis <code>config/providers.yaml</code>. Les clés API elles-mêmes ne sont jamais affichées — seulement le nom de la variable d'environnement et si elle est renseignée.</p>
+      <div id="providersList"><div class="empty">Chargement…</div></div>
+    </section>
+
+    <section>
+      <h2>Correspondances de fallback</h2>
+      <p class="hint">Depuis <code>config/fallback.yaml</code>. En cas de panne/latence du fournisseur primaire, bascule automatique vers le fournisseur/modèle de repli.</p>
+      <div id="fallbackList"><div class="empty">Chargement…</div></div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    async function loadProviders() {
+      const list = $('providersList');
+      try {
+        const res = await fetch('/api/providers');
+        const data = await res.json();
+        if (!data.providers || data.providers.length === 0) {
+          list.innerHTML = '<div class="empty">Aucun fournisseur configuré.</div>';
+          return;
+        }
+        list.innerHTML = data.providers.map((p) => `<div class="provider-card">
+          <div class="top">
+            <h3>${escapeHtml(p.name)}</h3>
+            <div>
+              ${p.is_default ? '<span class="badge default">défaut</span>' : ''}
+              <span class="badge ${p.api_key_set ? 'key-ok' : 'key-missing'}">${p.api_key_set ? 'clé définie' : 'clé absente'}</span>
+            </div>
+          </div>
+          <div class="url">${escapeHtml(p.base_url)}</div>
+          <div class="url">env: ${escapeHtml(p.api_key_env)}</div>
+        </div>`).join('');
+      } catch (e) {
+        list.innerHTML = `<div class="empty">Erreur réseau : ${escapeHtml(e)}</div>`;
+      }
+    }
+
+    async function loadFallback() {
+      const list = $('fallbackList');
+      try {
+        const res = await fetch('/api/fallback');
+        const data = await res.json();
+        if (!data.chains || data.chains.length === 0) {
+          list.innerHTML = `<div class="empty">Aucune correspondance de fallback configurée (timeout par défaut : ${data.timeout_ms} ms).</div>`;
+          return;
+        }
+        list.innerHTML = data.chains.map((c) => `<div class="chain-card">
+          <code>${escapeHtml(c.primary_provider)}${c.primary_model ? '/' + escapeHtml(c.primary_model) : ' (tout modèle)'}</code>
+          <span class="arrow">→</span>
+          <code>${escapeHtml(c.fallback_provider)}${c.fallback_model ? '/' + escapeHtml(c.fallback_model) : ' (même modèle)'}</code>
+          <span style="margin-left:auto;color:#9aa2af;font-size:.75rem;">timeout ${data.timeout_ms} ms</span>
+        </div>`).join('');
+      } catch (e) {
+        list.innerHTML = `<div class="empty">Erreur réseau : ${escapeHtml(e)}</div>`;
+      }
+    }
+
+    $('refresh').addEventListener('click', () => { loadProviders(); loadFallback(); });
+    loadProviders();
+    loadFallback();
+  </script>
+</body>
+</html>

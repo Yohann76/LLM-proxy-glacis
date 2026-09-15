@@ -8,6 +8,11 @@ services:
       - .env
     volumes:
       - ./config:/app/config:ro
+      # Seul virtual_keys.yaml est monté en lecture-écriture (mount plus
+      # spécifique, prioritaire sur le :ro parent) — la Vue FinOps de
+      # l'admin peut créer/révoquer des clés depuis l'interface. Tous les
+      # autres fichiers de config restent en lecture seule.
+      - ./config/virtual_keys.yaml:/app/config/virtual_keys.yaml
       - ./data:/app/data
     ports:
       - "${PROXY_PORT:-45321}:8080"

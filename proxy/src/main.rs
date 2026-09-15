@@ -1,4 +1,5 @@
 mod audit;
+mod fallback;
 mod finops;
 mod pii;
 mod rules;
@@ -6,10 +7,10 @@ mod unite;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -17,7 +18,7 @@ use serde_json::json;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use unite::{LogsAxis, Store, TokenUsage, UniteRecord};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 struct ProviderConfig {
     base_url: String,
     api_key_env: String,
@@ -38,6 +39,7 @@ struct AppState {
     pii_masking_enabled: bool,
     audit_log_path: Arc<PathBuf>,
     virtual_keys: finops::VirtualKeyStore,
+    fallback_store: fallback::FallbackStore,
 }
 
 #[tokio::main]
@@ -97,6 +99,12 @@ async fn main() {
     virtual_keys.rehydrate_from_audit(&audit::read_all(&audit_log_path)).await;
     virtual_keys.spawn_watcher(std::time::Duration::from_secs(2));
 
+    // Fallback / Failover (Étape 7).
+    let fallback_path =
+        std::env::var("PROXY_FALLBACK").unwrap_or_else(|_| "config/fallback.yaml".to_string());
+    let fallback_store = fallback::FallbackStore::load_initial(fallback_path.into());
+    fallback_store.spawn_watcher(std::time::Duration::from_secs(2));
+
     let state = AppState {
         config: Arc::new(config),
         http: reqwest::Client::new(),
@@ -105,6 +113,7 @@ async fn main() {
         pii_masking_enabled,
         audit_log_path: Arc::new(audit_log_path),
         virtual_keys,
+        fallback_store,
     };
 
     let app = Router::new()
@@ -115,6 +124,16 @@ async fn main() {
         .route("/internal/rules/test", post(test_rules))
         .route("/internal/compliance-report", get(compliance_report))
         .route("/internal/chargeback", get(chargeback))
+        .route(
+            "/internal/virtual-keys",
+            post(create_virtual_key),
+        )
+        .route(
+            "/internal/virtual-keys/:id",
+            delete(delete_virtual_key),
+        )
+        .route("/internal/fallback", get(fallback_summary))
+        .route("/internal/providers", get(list_providers))
         .route("/v1/*rest", any(passthrough))
         .with_state(state);
 
@@ -250,8 +269,90 @@ async fn compliance_report(
 async fn chargeback(State(state): State<AppState>) -> Json<serde_json::Value> {
     let entries = state.virtual_keys.chargeback_report().await;
     Json(json!({
-        "enforced": state.virtual_keys.is_enforced().await,
+        "has_keys": state.virtual_keys.has_keys().await,
         "keys": entries,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateVirtualKeyInput {
+    name: String,
+    #[serde(default)]
+    quota_tokens: Option<u64>,
+    #[serde(default)]
+    cost_per_1k_tokens: Option<f64>,
+}
+
+/// Crée une clé virtuelle depuis l'interface (Étape 8, "gestion des
+/// accès") et persiste `config/virtual_keys.yaml`. La clé brute générée
+/// n'est renvoyée qu'ICI, une seule fois — jamais consultable ensuite.
+async fn create_virtual_key(
+    State(state): State<AppState>,
+    Json(input): Json<CreateVirtualKeyInput>,
+) -> impl IntoResponse {
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "le nom est requis").into_response();
+    }
+    match state
+        .virtual_keys
+        .create_key(name, input.quota_tokens, input.cost_per_1k_tokens)
+        .await
+    {
+        Ok(vk) => Json(vk).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("échec de la création : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Révoque une clé virtuelle (par son `id`, jamais par la clé brute) et
+/// persiste `config/virtual_keys.yaml`.
+async fn delete_virtual_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.virtual_keys.delete_key_by_id(&id).await {
+        Ok(true) => Json(json!({ "deleted": true })).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "clé introuvable").into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("échec de la révocation : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Introspection des correspondances de fallback (Étape 7) — utile pour
+/// vérifier un rechargement à chaud sans SSH dans le conteneur.
+async fn fallback_summary(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.fallback_store.summary().await)
+}
+
+/// Introspection des fournisseurs configurés (Étape 8, "Vue Fournisseurs") :
+/// noms, URL de base, nom de la variable d'environnement de clé (jamais la
+/// valeur), et si cette variable est actuellement définie.
+async fn list_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let providers: Vec<serde_json::Value> = state
+        .config
+        .providers
+        .iter()
+        .map(|(name, p)| {
+            let key_set = std::env::var(&p.api_key_env).map(|v| !v.is_empty()).unwrap_or(false);
+            json!({
+                "name": name,
+                "base_url": p.base_url,
+                "api_key_env": p.api_key_env,
+                "api_key_set": key_set,
+                "is_default": name == &state.config.default_provider,
+            })
+        })
+        .collect();
+    Json(json!({
+        "default_provider": state.config.default_provider,
+        "providers": providers,
     }))
 }
 
@@ -332,14 +433,15 @@ async fn passthrough(
     let mission = header_str(&headers, "x-proxyllm-mission")
         .unwrap_or("non_precise")
         .to_string();
-    let ressource = match &model_hint {
+    let mut ressource = match &model_hint {
         Some(model) => format!("{provider_name}/{model}"),
         None => provider_name.clone(),
     };
 
-    // Clés API virtuelles (Étape 6) : question d'identité/accès, traitée
-    // avant tout le reste. Sans clé configurée (fichier vide), le proxy
-    // reste ouvert et se comporte exactement comme avant cette étape.
+    // Clés API virtuelles (Étape 6) : identification et suivi FinOps
+    // optionnels, jamais une porte d'accès. Fournir une clé permet de
+    // rattacher l'appel à une équipe/un quota ; ne pas en fournir laisse
+    // simplement passer la requête, journalisée comme non rattachée.
     let client_bearer = header_str(&headers, "authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|v| !v.is_empty())
@@ -348,42 +450,15 @@ async fn passthrough(
         Some(token) => state.virtual_keys.resolve(token).await,
         None => None,
     };
-    let virtual_key_enforced = state.virtual_keys.is_enforced().await;
-
-    if virtual_key_enforced && resolved_key.is_none() {
-        emit_unite(
-            &state,
-            UniteInput {
-                request_id,
-                action,
-                acteur: "inconnu".to_string(),
-                contexte,
-                ressource,
-                relation,
-                objectif,
-                mission,
-                method: method_str,
-                path,
-                status: StatusCode::UNAUTHORIZED.as_u16(),
-                latency_ms: start.elapsed().as_millis(),
-                request_bytes,
-                risques: "cle virtuelle invalide ou absente".to_string(),
-                realisation: "acces refuse".to_string(),
-                pii_masked: false,
-                pii_categories: Vec::new(),
-                virtual_key: None,
-                tokens: TokenUsage::default(),
-            },
-        );
-        return (
-            StatusCode::UNAUTHORIZED,
-            "clé API virtuelle invalide ou absente (en-tête Authorization: Bearer <clé>)",
-        )
-            .into_response();
-    }
+    let virtual_keys_configured = state.virtual_keys.has_keys().await;
 
     let acteur = match &resolved_key {
         Some(vk) => vk.name.clone(),
+        // Des clés existent (au moins une équipe est suivie) mais celle-ci
+        // n'en a fourni aucune / une clé non reconnue : rattachée à aucune
+        // équipe plutôt que déduite de l'IP/en-tête, pour rester cohérent
+        // avec les appels effectivement suivis.
+        None if virtual_keys_configured => "Équipe inconnue".to_string(),
         None => acteur,
     };
 
@@ -608,35 +683,86 @@ async fn passthrough(
         },
     };
 
-    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    let target_url = format!(
-        "{}{}",
-        provider.base_url.trim_end_matches('/'),
-        path_and_query
-    );
+    let path_and_query = uri
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let forward_timeout = state.fallback_store.timeout().await;
 
-    let mut req = state.http.request(method, &target_url).body(body);
-    for (name, value) in headers.iter() {
-        if matches!(
-            name.as_str(),
-            "host"
-                | "authorization"
-                | "content-length"
-                | "x-proxyllm-provider"
-                | "x-proxyllm-api-key"
-                | "x-proxyllm-actor"
-                | "x-proxyllm-context"
-                | "x-proxyllm-session"
-                | "x-proxyllm-objective"
-                | "x-proxyllm-mission"
-        ) {
-            continue;
+    let mut resp_result = attempt_call(
+        &state,
+        provider,
+        method.clone(),
+        &path_and_query,
+        &headers,
+        body.clone(),
+        &api_key,
+        forward_timeout,
+    )
+    .await;
+
+    // Fallback / Failover (Étape 7) : une erreur réseau, un délai dépassé
+    // avant réception des en-têtes, ou une erreur serveur (5xx) du
+    // fournisseur primaire déclenchent une bascule si une correspondance
+    // est configurée. Une seule tentative de repli (pas de cascade).
+    let primary_failed = match &resp_result {
+        Ok(r) => r.status().is_server_error(),
+        Err(_) => true,
+    };
+    let mut fallback_note: Option<String> = None;
+
+    if primary_failed {
+        if let Some(chain) = state
+            .fallback_store
+            .resolve(&provider_name, model_hint.as_deref())
+            .await
+        {
+            if let Some(fb_provider) = state.config.providers.get(&chain.fallback_provider) {
+                if let Some(fb_api_key) = resolve_api_key_from_env(fb_provider) {
+                    let reason = match &resp_result {
+                        Ok(r) => format!("erreur serveur {}", r.status().as_u16()),
+                        Err(e) => format!("panne/latence : {e}"),
+                    };
+                    let fb_body = match &chain.fallback_model {
+                        Some(m) => Bytes::from(fallback::substitute_model(&body, m)),
+                        None => body.clone(),
+                    };
+                    match attempt_call(
+                        &state,
+                        fb_provider,
+                        method.clone(),
+                        &path_and_query,
+                        &headers,
+                        fb_body,
+                        &fb_api_key,
+                        forward_timeout,
+                    )
+                    .await
+                    {
+                        Ok(fb_resp) => {
+                            ressource = match &chain.fallback_model {
+                                Some(m) => format!("{}/{m}", chain.fallback_provider),
+                                None => chain.fallback_provider.clone(),
+                            };
+                            fallback_note = Some(format!(
+                                "bascule {provider_name} -> {} ({reason})",
+                                chain.fallback_provider
+                            ));
+                            resp_result = Ok(fb_resp);
+                        }
+                        Err(_) => {
+                            // Le repli a aussi échoué : `resp_result` garde
+                            // l'échec d'origine, géré juste après comme un
+                            // échec normal.
+                        }
+                    }
+                }
+            }
         }
-        req = req.header(name, value);
     }
-    req = req.header("authorization", format!("Bearer {api_key}"));
 
-    let resp = match req.send().await {
+    let resp = match resp_result {
         Ok(r) => r,
         Err(e) => {
             emit_unite(
@@ -680,6 +806,10 @@ async fn passthrough(
         )
     } else {
         format!("erreur http {}", status.as_u16())
+    };
+    let realisation = match &fallback_note {
+        Some(note) => format!("{realisation} ; {note}"),
+        None => realisation,
     };
 
     let mut out_headers = HeaderMap::new();
@@ -873,6 +1003,66 @@ fn extract_action(body: &Bytes, method: &str, path: &str) -> String {
         }
         None => fallback(),
     }
+}
+
+/// Une tentative d'appel à un fournisseur (primaire ou de repli). Le délai
+/// ne borne QUE l'attente des en-têtes de réponse (`req.send()`), jamais la
+/// lecture du corps : une complétion longue mais qui répond normalement
+/// n'est jamais interrompue par le timeout de fallback (Étape 7).
+async fn attempt_call(
+    state: &AppState,
+    provider: &ProviderConfig,
+    method: Method,
+    path_and_query: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    api_key: &str,
+    timeout: std::time::Duration,
+) -> Result<reqwest::Response, String> {
+    let target_url = format!(
+        "{}{}",
+        provider.base_url.trim_end_matches('/'),
+        path_and_query
+    );
+    let mut req = state.http.request(method, &target_url).body(body);
+    for (name, value) in headers.iter() {
+        if matches!(
+            name.as_str(),
+            "host"
+                | "authorization"
+                | "content-length"
+                | "x-proxyllm-provider"
+                | "x-proxyllm-api-key"
+                | "x-proxyllm-actor"
+                | "x-proxyllm-context"
+                | "x-proxyllm-session"
+                | "x-proxyllm-objective"
+                | "x-proxyllm-mission"
+        ) {
+            continue;
+        }
+        req = req.header(name, value);
+    }
+    req = req.header("authorization", format!("Bearer {api_key}"));
+
+    match tokio::time::timeout(timeout, req.send()).await {
+        Ok(Ok(resp)) => Ok(resp),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "délai dépassé ({} ms) en attente d'une réponse",
+            timeout.as_millis()
+        )),
+    }
+}
+
+/// Résolution de clé pour un fournisseur de repli : toujours depuis
+/// `.env` (`api_key_env`), jamais la surcharge `X-ProxyLLM-Api-Key` du
+/// client — celle-ci visait explicitement le fournisseur primaire demandé,
+/// pas un fournisseur de secours différent avec un format de clé distinct.
+fn resolve_api_key_from_env(provider: &ProviderConfig) -> Option<String> {
+    std::env::var(&provider.api_key_env)
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 fn emit_unite(state: &AppState, input: UniteInput) {

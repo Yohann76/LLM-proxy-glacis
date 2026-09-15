@@ -104,10 +104,11 @@ keys:
     cost_per_1k_tokens: 0.002   # optionnel — TON tarif interne, pas le vrai prix du fournisseur
 ```
 
-- **`keys: []` (défaut livré)** : le proxy reste **ouvert**, comme avant cette fonctionnalité — aucune authentification requise.
-- **Dès qu'une clé est définie** : le proxy exige `Authorization: Bearer <clé>` sur tout appel `/v1/*` — `401` sans clé valide.
-- La clé résolue devient l'axe **Acteur** de l'observabilité (remplace l'IP/en-tête — c'est une identité authentifiée, plus fiable).
-- **Quota** (`quota_tokens`, optionnel) : dépassé → `403`. Alerte dès 80 % du quota (visible dans l'axe Risques), sans bloquer.
+- **La clé est toujours facultative — jamais une porte d'accès.** Un appel sans clé (ou avec une clé non reconnue) passe normalement, quel que soit le contenu de `virtual_keys.yaml`. Aucun `401` n'est renvoyé pour une clé absente ou invalide.
+- Si la clé fournie correspond à une clé configurée, elle devient l'axe **Acteur** de l'observabilité (remplace l'IP/en-tête) et l'appel est rattaché à son quota/chargeback.
+- **Si au moins une clé existe dans le fichier** mais que l'appel n'en fournit pas (ou une non reconnue) : Acteur = **`"Équipe inconnue"`** — visible et journalisé, mais pas bloqué, pas de quota appliqué (aucune limite sur les appels non rattachés).
+- **Si aucune clé n'est configurée** (`keys: []`) : comportement inchangé depuis l'Étape 2, Acteur dérivé de l'IP/en-tête.
+- **Quota** (`quota_tokens`, optionnel, uniquement pour un appel rattaché à une clé) : dépassé → `403`. Alerte dès 80 % du quota (visible dans l'axe Risques), sans bloquer.
 - **Suivi des tokens** : extrait de la réponse du fournisseur (`usage.total_tokens`). ⚠️ Nécessite de bufferiser la réponse (perte du streaming zero-copy) — uniquement pour les appels authentifiés par une clé virtuelle, comme la réinjection PII de l'Étape 4.
 - **Persistant** : les compteurs sont réhydratés au démarrage depuis `data/audit.jsonl` (pas de mécanisme de stockage séparé) — survivent aux redémarrages du conteneur.
 - Les clés brutes ne sont **jamais exposées** par l'admin ou les endpoints `/internal/*` — toujours masquées (`****xxxx`).
@@ -116,13 +117,46 @@ keys:
 
 Page dédiée : **http://162.19.241.44:45322/finops.html** (carte "FinOps" du dashboard).
 
-- Bandeau d'état : proxy ouvert (aucune clé) ou fermé (authentification requise).
+- Bandeau d'état : suivi par équipe actif (au moins une clé configurée) ou aucune clé configurée pour l'instant — jamais "accès bloqué", puisque les clés ne bloquent rien.
 - Une carte par clé virtuelle : nom, clé masquée, tokens consommés, quota, barre de progression (bleu → orange proche du quota → rouge dépassé), nombre de requêtes, coût estimé.
 - Backend : `GET /internal/chargeback` côté proxy, relayé par l'admin (`GET /api/chargeback`).
 
-### Tester l'authentification depuis l'admin
+**Créer une clé** : formulaire en haut de la page (nom requis, quota et taux de chargeback optionnels). La clé générée s'affiche **une seule fois**, dans un bandeau à copier immédiatement — elle n'est plus jamais consultable ensuite, ni dans cette vue ni ailleurs (même logique que GitHub/AWS/Stripe). Écrit directement dans `config/virtual_keys.yaml` (via `POST /internal/virtual-keys`).
 
-`test.html` a un champ **"Clé virtuelle"** (distinct du champ "Clé API" existant) — envoyé en `Authorization: Bearer <valeur>` vers le proxy, pour tester `config/virtual_keys.yaml` sans terminal. Sauvegardé dans le `localStorage` du navigateur (séparément de la clé API), jamais dans `.env`.
+**Révoquer une clé** : bouton "Révoquer" sur chaque carte (confirmation demandée). Supprime la clé de `config/virtual_keys.yaml` (via `DELETE /internal/virtual-keys/:id`) — un appel qui présente ensuite cette clé n'est plus rattaché à l'équipe (traité comme une clé absente : "Équipe inconnue", pas de blocage).
+
+⚠️ Seul `config/virtual_keys.yaml` est modifiable depuis l'interface — c'est aussi le seul fichier de config monté en écriture dans `docker-compose.yml` (mount dédié, plus spécifique que le `:ro` du dossier parent). `providers.yaml`, `rules.yaml` et `fallback.yaml` restent éditables uniquement à la main, en lecture seule pour le conteneur.
+
+### Tester le rattachement à une équipe depuis l'admin
+
+`test.html` a un champ **"Clé virtuelle"** (distinct du champ "Clé API" existant, et facultatif comme au niveau du proxy) — envoyé en `Authorization: Bearer <valeur>` vers le proxy, pour vérifier qu'un appel se rattache bien à la bonne équipe dans `finops.html`/`fourmi.html`, sans terminal. Laisser le champ vide envoie un appel non rattaché (Acteur = "Équipe inconnue" si des clés existent). Sauvegardé dans le `localStorage` du navigateur (séparément de la clé API), jamais dans `.env`.
+
+## Fallback / Failover entre fournisseurs
+
+Fichier : **`config/fallback.yaml`** (monté en volume, rechargé à chaud en ~2 s).
+
+```yaml
+timeout_ms: 10000
+chains:
+  - primary_provider: "openai"
+    fallback_provider: "mistral"
+    fallback_model: "mistral-small-latest"
+```
+
+- Si l'appel au fournisseur primaire échoue (erreur réseau, erreur serveur 5xx) ou ne répond pas dans `timeout_ms`, le proxy bascule automatiquement vers le fournisseur (et modèle, si précisé) de repli — une seule tentative, pas de cascade.
+- ⚠️ `timeout_ms` ne borne que l'attente de la **première réponse** (les en-têtes) — jamais la lecture du corps en streaming. Une complétion longue mais qui répond normalement n'est jamais interrompue.
+- `primary_model` (optionnel) restreint la règle à un modèle précis ; absent, elle s'applique à tout modèle de ce fournisseur.
+- `fallback_model` (optionnel) substitue le champ `"model"` du corps JSON ; absent, le modèle demandé est conservé tel quel chez le fournisseur de repli.
+- La clé du fournisseur de repli vient toujours de son `api_key_env` (`.env`) — jamais de la surcharge `X-ProxyLLM-Api-Key` du client.
+- **Visible directement dans `fourmi.html`** (pas de nouvelle vue dédiée) : l'axe Ressource montre le fournisseur qui a réellement servi la réponse, l'axe Réalisation documente la bascule et sa cause.
+
+### Vue Fournisseurs (dans l'admin)
+
+Page dédiée : **http://162.19.241.44:45322/providers.html** (carte "Fournisseurs" du dashboard).
+
+- Liste des fournisseurs configurés (`config/providers.yaml`) : URL de base, nom de la variable de clé, si elle est définie (jamais la valeur).
+- Liste des correspondances de fallback (`config/fallback.yaml`), timeout inclus.
+- Backend : `GET /internal/providers` et `GET /internal/fallback` côté proxy, relayés par l'admin (`GET /api/providers`, `GET /api/fallback`).
 
 ## Observabilité (méthode Unité)
 

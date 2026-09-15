@@ -2,23 +2,30 @@
 //!
 //! Contrairement aux fournisseurs (`providers.yaml`) et aux règles
 //! (`rules.yaml`), les clés virtuelles ne sont pas une politique de
-//! contenu : ce sont des identités authentifiées pour le suivi de
-//! consommation et le chargeback.
+//! contenu : ce sont des identités **optionnelles** pour le suivi de
+//! consommation et le chargeback — jamais une porte d'accès.
 //!
-//! **Comportement par défaut (aucune clé configurée) : le proxy reste
-//! ouvert**, exactement comme avant cette étape — pour ne rien casser tant
-//! que l'admin n'a pas explicitement activé le contrôle d'accès. Dès
-//! qu'une clé au moins est définie dans `config/virtual_keys.yaml`, le
-//! proxy exige une clé valide (`Authorization: Bearer <clé>`) pour tout
-//! appel `/v1/*` — 401 sinon.
+//! Une clé (`Authorization: Bearer <clé>`) rattache l'appel à une équipe et
+//! à son quota. Sans clé, ou avec une clé non reconnue, la requête passe
+//! normalement — journalisée sous l'acteur `"Équipe inconnue"` si au moins
+//! une clé est configurée quelque part (sinon l'acteur reste dérivé de
+//! l'IP/en-tête, comme avant l'Étape 6). Aucun `401` n'est jamais renvoyé
+//! pour une clé absente ou invalide.
 
 use crate::unite::{TokenUsage, UniteRecord};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::SystemTime};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VirtualKeyConfig {
+    /// Identifiant non secret (aléatoire, indépendant de `key`), utilisé
+    /// pour cibler une révocation depuis l'admin sans jamais avoir besoin
+    /// de la vraie clé. L'exposer ne permet PAS de reconstituer `key`.
+    /// (`default` couvre les fichiers écrits avant l'ajout de ce champ.)
+    #[serde(default = "new_id")]
+    pub id: String,
     pub key: String,
     pub name: String,
     /// Budget cumulé en tokens. `None` = pas de limite.
@@ -30,7 +37,11 @@ pub struct VirtualKeyConfig {
     pub cost_per_1k_tokens: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+fn new_id() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct RawKeysFile {
     #[serde(default)]
     keys: Vec<VirtualKeyConfig>,
@@ -50,6 +61,7 @@ fn mask_key(key: &str) -> String {
 
 #[derive(Debug, Serialize)]
 pub struct ChargebackEntry {
+    pub id: String,
     pub name: String,
     pub key_masked: String,
     pub quota_tokens: Option<u64>,
@@ -84,10 +96,10 @@ impl VirtualKeyStore {
             .unwrap_or_else(|e| panic!("fichier de clés virtuelles invalide {}: {e}", path.display()));
         let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         if keys.is_empty() {
-            println!("Clés virtuelles : aucune configurée dans {} — proxy ouvert (pas d'authentification requise)", path.display());
+            println!("Clés virtuelles : aucune configurée dans {}", path.display());
         } else {
             println!(
-                "Clés virtuelles chargées depuis {} : {} clé(s) — authentification requise sur /v1/*",
+                "Clés virtuelles chargées depuis {} : {} clé(s) — identification optionnelle sur /v1/* (\"Équipe inconnue\" si absente)",
                 path.display(),
                 keys.len()
             );
@@ -129,7 +141,10 @@ impl VirtualKeyStore {
         }
     }
 
-    pub async fn is_enforced(&self) -> bool {
+    /// Vrai si au moins une clé est configurée — indique si une requête
+    /// sans clé doit être journalisée comme "Équipe inconnue" plutôt que
+    /// via l'IP/en-tête. Ne conditionne plus aucun blocage.
+    pub async fn has_keys(&self) -> bool {
         !self.keys.read().await.is_empty()
     }
 
@@ -174,6 +189,70 @@ impl VirtualKeyStore {
         }
     }
 
+    /// Crée une nouvelle clé virtuelle et persiste immédiatement le
+    /// fichier de config. La clé elle-même est générée côté serveur
+    /// (aléatoire — réutilise `uuid`, déjà une dépendance), jamais choisie
+    /// par l'admin : évite les clés faibles ou devinables. La valeur brute
+    /// n'est retournée qu'à cet instant, par l'appelant — jamais
+    /// re-consultable ensuite (ni ici, ni dans aucune vue admin).
+    pub async fn create_key(
+        &self,
+        name: String,
+        quota_tokens: Option<u64>,
+        cost_per_1k_tokens: Option<f64>,
+    ) -> Result<VirtualKeyConfig, String> {
+        let new_key = VirtualKeyConfig {
+            id: new_id(),
+            key: format!("vk-{}", Uuid::new_v4().simple()),
+            name,
+            quota_tokens,
+            cost_per_1k_tokens,
+        };
+
+        let mut keys = self.keys.write().await;
+        keys.push(new_key.clone());
+        self.persist(&keys).await?;
+        drop(keys);
+        self.note_own_write().await;
+
+        Ok(new_key)
+    }
+
+    /// Révoque (supprime) une clé virtuelle par son `id` (non secret —
+    /// jamais par la valeur brute de `key`, que l'admin n'a plus après la
+    /// création) et persiste le fichier. Retourne `false` si l'id
+    /// n'existait pas (pas une erreur).
+    pub async fn delete_key_by_id(&self, id: &str) -> Result<bool, String> {
+        let mut keys = self.keys.write().await;
+        let before = keys.len();
+        keys.retain(|k| k.id != id);
+        let removed = keys.len() < before;
+
+        if removed {
+            self.persist(&keys).await?;
+            drop(keys);
+            self.note_own_write().await;
+        }
+        Ok(removed)
+    }
+
+    async fn persist(&self, keys: &[VirtualKeyConfig]) -> Result<(), String> {
+        let file = RawKeysFile { keys: keys.to_vec() };
+        let yaml = serde_yaml::to_string(&file).map_err(|e| e.to_string())?;
+        tokio::fs::write(&self.path, yaml)
+            .await
+            .map_err(|e| format!("écriture de {} impossible : {e}", self.path.display()))
+    }
+
+    /// Met à jour `last_loaded_mtime` après une écriture faite par nous-
+    /// mêmes, pour que le watcher de rechargement à chaud ne déclenche pas
+    /// un rechargement redondant juste après (inoffensif si ça arrivait
+    /// quand même — juste un log en double).
+    async fn note_own_write(&self) {
+        let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
+        *self.last_loaded_mtime.write().await = mtime;
+    }
+
     pub fn spawn_watcher(&self, interval: std::time::Duration) {
         let store = self.clone();
         tokio::spawn(async move {
@@ -204,6 +283,7 @@ impl VirtualKeyStore {
                     }
                 });
                 ChargebackEntry {
+                    id: k.id.clone(),
                     name: k.name.clone(),
                     key_masked: mask_key(&k.key),
                     quota_tokens: k.quota_tokens,

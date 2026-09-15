@@ -1,41 +1,11 @@
-# Clés API virtuelles & FinOps — Étape 6, cf. Docs/cahier-des-charges.md §3.
-#
-# TANT QUE CE FICHIER NE DÉFINIT AUCUNE CLÉ (comme actuellement), le proxy
-# reste ouvert : aucune authentification requise, comportement identique aux
-# étapes précédentes. Dès qu'au moins une clé est définie ci-dessous, le
-# proxy exige un en-tête `Authorization: Bearer <clé>` valide sur tout appel
-# `/v1/*` — 401 sinon.
-#
-# Fichier surveillé et rechargé à chaud (~2s), comme rules.yaml.
-#
-# Champs par clé :
-#   key                 : la clé elle-même (générée par l'admin, à donner au
-#                          client — jamais la vraie clé du fournisseur LLM)
-#   name                : nom lisible (équipe, projet...) — utilisé comme
-#                          axe Acteur dans l'observabilité
-#   quota_tokens        : budget cumulé en tokens (optionnel, pas de limite
-#                          si absent) — dépassé => requêtes bloquées (403)
-#   cost_per_1k_tokens   : taux indicatif pour l'estimation de chargeback
-#                          (optionnel — c'est TON tarif interne, pas
-#                          nécessairement le vrai prix du fournisseur)
-#
-# Exemple (à décommenter et adapter) :
-#
-# keys:
-#   - key: "vk-marketing-team-a1b2c3"
-#     name: "Équipe Marketing"
-#     quota_tokens: 500000
-#     cost_per_1k_tokens: 0.002
-#   - key: "vk-dev-junior-x9y8z7"
-#     name: "Dev Junior"
-#     quota_tokens: 50000
-
 keys:
-  - key: "vk-marketing-621552ca"
-    name: "Équipe Marketing"
-    quota_tokens: 500000
-    cost_per_1k_tokens: 0.002
-  - key: "vk-dev-184d2c14"
-    name: "Équipe Développement"
-    quota_tokens: 2000000
-    cost_per_1k_tokens: 0.002
+- id: 3a39f9d01ffb46e9adb22fd85f45a94c
+  key: vk-marketing-621552ca
+  name: Équipe Marketing
+  quota_tokens: 500000
+  cost_per_1k_tokens: 0.002
+- id: 6ba9e39856b942128064373fc725bfec
+  key: vk-dev-184d2c14
+  name: Équipe Développement
+  quota_tokens: 2000000
+  cost_per_1k_tokens: 0.002
