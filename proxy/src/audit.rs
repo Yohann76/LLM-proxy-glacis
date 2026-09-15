@@ -16,7 +16,10 @@
 use crate::unite::UniteRecord;
 use printpdf::{BuiltinFont, Mm, PdfDocument};
 use serde::Serialize;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+};
 use tokio::io::AsyncWriteExt;
 
 /// Ajoute une unité au journal d'audit persistant. Appelé depuis la même
@@ -182,6 +185,141 @@ pub fn compute_report(
         alert_events,
         pii_events,
     }
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct HourBucket {
+    pub label: String,
+    pub count: usize,
+    pub blocked: usize,
+}
+
+/// Résumé pour le tableau de bord de la page d'accueil admin : indicateurs
+/// du jour (minuit UTC) + série horaire glissante sur 24h, calculés à
+/// chaque appel directement depuis le journal d'audit (pas de cache — le
+/// volume visé pour cette démo reste largement dans le budget d'un scan
+/// linéaire).
+#[derive(Debug, Serialize)]
+pub struct DashboardSummary {
+    pub generated_at_unix_ms: u128,
+    pub requests_today: usize,
+    pub requests_total: usize,
+    pub blocked_today: usize,
+    pub blocked_total: usize,
+    pub alerts_today: usize,
+    pub pii_masked_today: usize,
+    pub tokens_today: u64,
+    pub cost_today: f64,
+    pub active_rules: usize,
+    pub providers_count: usize,
+    pub virtual_keys_count: usize,
+    pub hourly: Vec<HourBucket>,
+    pub by_provider_today: BTreeMap<String, usize>,
+}
+
+/// Agrège le journal d'audit pour le tableau de bord. `cost_rates` associe
+/// une clé virtuelle brute à son `cost_per_1k_tokens` — le coût du jour
+/// n'est estimable que pour les appels rattachés à une clé virtuelle
+/// tarifée, exactement la même limite que le rapport chargeback existant.
+pub fn compute_dashboard(
+    records: &[UniteRecord],
+    cost_rates: &HashMap<String, f64>,
+    active_rules: usize,
+    providers_count: usize,
+    virtual_keys_count: usize,
+) -> DashboardSummary {
+    let now = crate::unite::now_unix_ms();
+    let start_of_day = (now / 86_400_000) * 86_400_000;
+    let current_hour_start = (now / 3_600_000) * 3_600_000;
+    let window_start = current_hour_start.saturating_sub(23 * 3_600_000);
+
+    let mut requests_today = 0usize;
+    let mut blocked_today = 0usize;
+    let mut blocked_total = 0usize;
+    let mut alerts_today = 0usize;
+    let mut pii_masked_today = 0usize;
+    let mut tokens_today: u64 = 0;
+    let mut cost_today = 0.0f64;
+    let mut by_provider_today: BTreeMap<String, usize> = BTreeMap::new();
+    let mut buckets: BTreeMap<u128, (usize, usize)> = BTreeMap::new();
+
+    for r in records {
+        let blocked = r.risques.starts_with("bloque par la regle");
+        if blocked {
+            blocked_total += 1;
+        }
+
+        if r.timestamp_unix_ms >= start_of_day {
+            requests_today += 1;
+            if blocked {
+                blocked_today += 1;
+            }
+            if r.risques.contains("alerte(s)") {
+                alerts_today += 1;
+            }
+            if r.pii_masked {
+                pii_masked_today += 1;
+            }
+            tokens_today += r.tokens.total_tokens;
+            if let Some(vk) = &r.virtual_key {
+                if let Some(rate) = cost_rates.get(vk) {
+                    cost_today += (r.tokens.total_tokens as f64 / 1000.0) * rate;
+                }
+            }
+            let provider = r
+                .ressource
+                .split('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("inconnu")
+                .to_string();
+            *by_provider_today.entry(provider).or_insert(0) += 1;
+        }
+
+        if r.timestamp_unix_ms >= window_start {
+            let bucket_start = (r.timestamp_unix_ms / 3_600_000) * 3_600_000;
+            let entry = buckets.entry(bucket_start).or_insert((0, 0));
+            entry.0 += 1;
+            if blocked {
+                entry.1 += 1;
+            }
+        }
+    }
+
+    let mut hourly = Vec::with_capacity(24);
+    for i in (0..24u128).rev() {
+        let bucket_start = current_hour_start.saturating_sub(i * 3_600_000);
+        let (count, blocked) = buckets.get(&bucket_start).copied().unwrap_or((0, 0));
+        hourly.push(HourBucket {
+            label: hour_label(bucket_start),
+            count,
+            blocked,
+        });
+    }
+
+    DashboardSummary {
+        generated_at_unix_ms: now,
+        requests_today,
+        requests_total: records.len(),
+        blocked_today,
+        blocked_total,
+        alerts_today,
+        pii_masked_today,
+        tokens_today,
+        cost_today,
+        active_rules,
+        providers_count,
+        virtual_keys_count,
+        hourly,
+        by_provider_today,
+    }
+}
+
+fn hour_label(unix_ms: u128) -> String {
+    let secs = (unix_ms / 1000) as i64;
+    let rem = secs.rem_euclid(86400);
+    let h = rem / 3600;
+    format!("{h:02}h")
 }
 
 /// Convertit un timestamp unix (ms) en date lisible UTC, sans dépendance

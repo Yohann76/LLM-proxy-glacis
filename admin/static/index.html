@@ -6,9 +6,10 @@
   <title>ProxyLLM Glacis — Admin</title>
   <style>
     :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: system-ui, sans-serif;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       background: #0f1115;
       color: #e6e6e6;
     }
@@ -22,13 +23,14 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
       gap: 1rem;
-      padding: 2rem;
+      padding: 2rem 2rem 1rem;
     }
     .card {
       background: #171a21;
       border: 1px solid #262a33;
       border-radius: 8px;
       padding: 1.25rem;
+      transition: border-color .15s ease, transform .15s ease;
     }
     .card h2 { margin: 0 0 .5rem; font-size: 1rem; }
     .card p { margin: 0; color: #9aa2af; font-size: .85rem; }
@@ -44,6 +46,159 @@
     .badge.active { background: #1f3b2c; color: #7ee787; }
     .card a { text-decoration: none; color: inherit; display: block; }
     .card.linked { cursor: pointer; border-color: #3b6fe0; }
+    .card.linked:hover { border-color: #6a94ec; transform: translateY(-2px); }
+
+    /* ---- Tableau de bord : jetons de couleur (palette dataviz, instance
+       validée — cf. Docs skill dataviz/references/palette.md, valeurs
+       "dark") appliqués localement au site, qui est en thème sombre fixe. */
+    .dashboard {
+      --surface-1:      #171a21;
+      --surface-page:   #0f1115;
+      --text-primary:   #f2f3f5;
+      --text-secondary: #9aa2af;
+      --text-muted:     #6d7480;
+      --grid-line:      #262a33;
+      --baseline:       #383e4a;
+      --border-hair:    rgba(255,255,255,0.08);
+      --series-1:       #3987e5; /* bleu — volume / autorisé */
+      --series-2:       #d95926; /* orange — fournisseur B */
+      --series-3:       #199e70; /* aqua — fournisseur C */
+      --status-good:    #0ca30c;
+      --status-warning: #fab219;
+      --status-critical:#e66767; /* bloqué */
+      padding: 0 2rem 2.5rem;
+    }
+    .dashboard-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      margin: 1.5rem 0 1rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--grid-line);
+    }
+    .dashboard-head h2 { margin: 0; font-size: 1.05rem; color: var(--text-primary); }
+    .dash-updated { font-size: .75rem; color: var(--text-muted); white-space: nowrap; }
+    .dash-updated .dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--status-good);
+      margin-right: .4rem;
+      box-shadow: 0 0 0 0 rgba(12,163,12,.6);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(12,163,12,.5); }
+      70%  { box-shadow: 0 0 0 6px rgba(12,163,12,0); }
+      100% { box-shadow: 0 0 0 0 rgba(12,163,12,0); }
+    }
+
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: .85rem;
+      margin-bottom: 1.25rem;
+    }
+    .kpi-tile {
+      background: var(--surface-1);
+      border: 1px solid var(--grid-line);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      min-height: 92px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: .35rem;
+    }
+    .kpi-label { font-size: .72rem; color: var(--text-secondary); }
+    .kpi-value-row { display: flex; align-items: baseline; gap: .4rem; }
+    .kpi-value {
+      font-size: 1.65rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      line-height: 1;
+      font-variant-numeric: proportional-nums;
+    }
+    .kpi-value.critical { color: var(--status-critical); }
+    .kpi-caption { font-size: .72rem; color: var(--text-muted); }
+    .kpi-tile.skeleton .kpi-value { color: transparent; background: var(--grid-line); border-radius: 4px; }
+    .kpi-tile.skeleton .kpi-caption { color: transparent; background: var(--grid-line); border-radius: 4px; }
+
+    .charts-row {
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+      gap: .85rem;
+      align-items: stretch;
+    }
+    @media (max-width: 860px) {
+      .charts-row { grid-template-columns: 1fr; }
+    }
+    .chart-card {
+      background: var(--surface-1);
+      border: 1px solid var(--grid-line);
+      border-radius: 10px;
+      padding: 1.1rem 1.2rem 1rem;
+      display: flex;
+      flex-direction: column;
+      min-height: 260px;
+    }
+    .chart-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .5rem;
+      margin-bottom: .6rem;
+    }
+    .chart-head h3 { margin: 0; font-size: .85rem; color: var(--text-primary); font-weight: 600; }
+    .legend { display: flex; gap: .9rem; font-size: .72rem; color: var(--text-secondary); }
+    .legend-item { display: flex; align-items: center; gap: .35rem; }
+    .legend-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+    .chart-svg { width: 100%; flex: 1; min-height: 190px; overflow: visible; }
+    .chart-empty {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: .8rem;
+      text-align: center;
+    }
+
+    .chart-bar { transition: opacity .1s ease; }
+    .chart-bar:hover, .chart-bar.hovered { opacity: .82; }
+    .axis-label { fill: var(--text-muted); font-size: 9px; font-family: system-ui, sans-serif; }
+    .gridline { stroke: var(--grid-line); stroke-width: 1; }
+    .baseline { stroke: var(--baseline); stroke-width: 1; }
+    .provider-label { fill: var(--text-secondary); font-size: 10.5px; }
+    .provider-value { fill: var(--text-primary); font-size: 10.5px; font-weight: 600; }
+
+    .viz-tooltip {
+      position: fixed;
+      pointer-events: none;
+      background: #10131a;
+      border: 1px solid var(--grid-line);
+      border-radius: 6px;
+      padding: .45rem .6rem;
+      font-size: .72rem;
+      color: var(--text-primary);
+      box-shadow: 0 6px 18px rgba(0,0,0,.45);
+      z-index: 50;
+      opacity: 0;
+      transform: translate(-50%, -100%);
+      transition: opacity .08s ease;
+      white-space: nowrap;
+    }
+    .viz-tooltip.visible { opacity: 1; }
+    .viz-tooltip .t-title { color: var(--text-secondary); margin-bottom: .15rem; }
+    .viz-tooltip .t-row { display: flex; align-items: center; gap: .35rem; }
+    .viz-tooltip .t-swatch { width: 8px; height: 8px; border-radius: 2px; }
+
+    .dash-footer-note {
+      margin-top: .85rem;
+      font-size: .72rem;
+      color: var(--text-muted);
+    }
   </style>
 </head>
 <body>
@@ -95,5 +250,328 @@
       </a>
     </div>
   </main>
+
+  <section class="dashboard" aria-labelledby="dash-title">
+    <div class="dashboard-head">
+      <h2 id="dash-title">Vue d'ensemble</h2>
+      <span class="dash-updated" id="dashUpdated"><span class="dot"></span>chargement…</span>
+    </div>
+
+    <div class="kpi-row" id="kpiRow">
+      <div class="kpi-tile skeleton"><div class="kpi-label">Requêtes aujourd'hui</div><div class="kpi-value">—</div><div class="kpi-caption">—</div></div>
+      <div class="kpi-tile skeleton"><div class="kpi-label">Coût estimé du jour</div><div class="kpi-value">—</div><div class="kpi-caption">—</div></div>
+      <div class="kpi-tile skeleton"><div class="kpi-label">Bloquées aujourd'hui</div><div class="kpi-value">—</div><div class="kpi-caption">—</div></div>
+      <div class="kpi-tile skeleton"><div class="kpi-label">Règles actives</div><div class="kpi-value">—</div><div class="kpi-caption">—</div></div>
+      <div class="kpi-tile skeleton"><div class="kpi-label">PII/secrets masqués</div><div class="kpi-value">—</div><div class="kpi-caption">—</div></div>
+      <div class="kpi-tile skeleton"><div class="kpi-label">Fournisseurs configurés</div><div class="kpi-value">—</div><div class="kpi-caption">—</div></div>
+    </div>
+
+    <div class="charts-row">
+      <div class="chart-card">
+        <div class="chart-head">
+          <h3>Activité — 24 dernières heures</h3>
+          <div class="legend" id="hourlyLegend">
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--series-1)"></span>Autorisées</span>
+            <span class="legend-item"><span class="legend-swatch" style="background:var(--status-critical)"></span>Bloquées</span>
+          </div>
+        </div>
+        <svg id="hourlyChart" class="chart-svg" role="img" aria-label="Requêtes par heure sur les dernières 24 heures, autorisées et bloquées"></svg>
+        <div class="chart-empty" id="hourlyEmpty" hidden>Aucune requête sur les dernières 24 heures.</div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-head">
+          <h3>Fournisseurs — aujourd'hui</h3>
+        </div>
+        <svg id="providerChart" class="chart-svg" role="img" aria-label="Répartition des requêtes du jour par fournisseur"></svg>
+        <div class="chart-empty" id="providerEmpty" hidden>Aucune requête aujourd'hui.</div>
+      </div>
+    </div>
+    <p class="dash-footer-note">Calculé à partir du journal d'audit persistant (minuit UTC → maintenant). Le coût du jour n'est estimé que pour les appels rattachés à une clé virtuelle tarifée — voir <a href="/finops.html" style="color:inherit">FinOps</a>.</p>
+  </section>
+
+  <div class="viz-tooltip" id="vizTooltip"></div>
+
+  <script>
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    const fmtInt = (n) => (n ?? 0).toLocaleString('fr-FR');
+    const fmtCompact = (n) => {
+      n = n ?? 0;
+      if (n < 1000) return fmtInt(n);
+      if (n < 1_000_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+      return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+    };
+    const fmtCost = (c) => {
+      c = c ?? 0;
+      if (c === 0) return '$0.00';
+      if (c < 1000) return '$' + c.toFixed(c < 10 ? 4 : 2);
+      return '$' + fmtCompact(c);
+    };
+
+    const tooltip = document.getElementById('vizTooltip');
+    function showTooltip(evt, html) {
+      tooltip.innerHTML = html;
+      tooltip.classList.add('visible');
+      moveTooltip(evt);
+    }
+    function moveTooltip(evt) {
+      tooltip.style.left = evt.clientX + 'px';
+      tooltip.style.top = (evt.clientY - 10) + 'px';
+    }
+    function hideTooltip() {
+      tooltip.classList.remove('visible');
+    }
+
+    const NS = 'http://www.w3.org/2000/svg';
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS(NS, tag);
+      for (const k in attrs) {
+        // fill/stroke values referencing a CSS custom property go through
+        // the style attribute — var() resolution inside a plain XML
+        // presentation attribute is inconsistent across renderers.
+        if ((k === 'fill' || k === 'stroke') && String(attrs[k]).startsWith('var(')) {
+          el.style[k] = attrs[k];
+        } else {
+          el.setAttribute(k, attrs[k]);
+        }
+      }
+      return el;
+    }
+
+    function renderKpis(d) {
+      const tiles = [
+        {
+          label: "Requêtes aujourd'hui",
+          value: fmtCompact(d.requests_today),
+          caption: `${fmtInt(d.requests_total)} au total`,
+        },
+        {
+          label: 'Coût estimé du jour',
+          value: fmtCost(d.cost_today),
+          caption: `${fmtCompact(d.tokens_today)} tokens aujourd'hui`,
+        },
+        {
+          label: "Bloquées aujourd'hui",
+          value: fmtCompact(d.blocked_today),
+          caption: `${fmtInt(d.blocked_total)} au total`,
+          critical: d.blocked_today > 0,
+        },
+        {
+          label: 'Règles actives',
+          value: fmtCompact(d.active_rules),
+          caption: 'Policy-as-Code',
+        },
+        {
+          label: 'PII/secrets masqués',
+          value: fmtCompact(d.pii_masked_today),
+          caption: "aujourd'hui",
+        },
+        {
+          label: 'Fournisseurs configurés',
+          value: fmtCompact(d.providers_count),
+          caption: `${fmtInt(d.virtual_keys_count)} clé(s) virtuelle(s)`,
+        },
+      ];
+      const row = document.getElementById('kpiRow');
+      row.innerHTML = tiles.map(t => `
+        <div class="kpi-tile">
+          <div class="kpi-label">${t.label}</div>
+          <div class="kpi-value-row"><div class="kpi-value${t.critical ? ' critical' : ''}">${t.value}</div></div>
+          <div class="kpi-caption">${t.caption}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderHourlyChart(hourly) {
+      const svg = document.getElementById('hourlyChart');
+      const empty = document.getElementById('hourlyEmpty');
+      svg.innerHTML = '';
+      const total = hourly.reduce((s, h) => s + h.count, 0);
+      if (total === 0) {
+        svg.setAttribute('viewBox', '0 0 100 100');
+        empty.hidden = false;
+        return;
+      }
+      empty.hidden = true;
+
+      const W = 600, H = 200;
+      const padL = 28, padR = 6, padT = 8, padB = 20;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('preserveAspectRatio', 'none');
+
+      const maxVal = Math.max(1, ...hourly.map(h => h.count));
+      // gridlines at 0, mid, max (rounded)
+      const niceMax = Math.ceil(maxVal / 4) * 4 || 4;
+      [0, 0.5, 1].forEach(f => {
+        const y = padT + plotH * (1 - f);
+        svg.appendChild(svgEl('line', { class: 'gridline', x1: padL, x2: W - padR, y1: y, y2: y }));
+        const label = svgEl('text', { class: 'axis-label', x: padL - 4, y: y + 3, 'text-anchor': 'end' });
+        label.textContent = Math.round(niceMax * f);
+        svg.appendChild(label);
+      });
+
+      const n = hourly.length;
+      const slot = plotW / n;
+      const barW = Math.min(22, slot * 0.55);
+
+      hourly.forEach((h, i) => {
+        const cx = padL + slot * i + slot / 2;
+        const allowed = h.count - h.blocked;
+        const allowedH = (allowed / niceMax) * plotH;
+        const blockedH = (h.blocked / niceMax) * plotH;
+        const baseY = padT + plotH;
+
+        const group = svgEl('g', {});
+
+        if (allowed > 0) {
+          const rect = svgEl('rect', {
+            class: 'chart-bar', x: cx - barW / 2, width: barW,
+            y: baseY - allowedH, height: Math.max(allowedH, 0),
+            rx: 2, fill: 'var(--series-1)',
+          });
+          group.appendChild(rect);
+        }
+        if (h.blocked > 0) {
+          const rect = svgEl('rect', {
+            class: 'chart-bar', x: cx - barW / 2, width: barW,
+            y: baseY - allowedH - blockedH, height: Math.max(blockedH, 0),
+            rx: 2, fill: 'var(--status-critical)',
+          });
+          group.appendChild(rect);
+        }
+        if (allowed === 0 && h.blocked === 0) {
+          group.appendChild(svgEl('rect', {
+            x: cx - barW / 2, width: barW, y: baseY - 2, height: 2,
+            fill: 'var(--grid-line)',
+          }));
+        }
+
+        const hit = svgEl('rect', {
+          x: cx - slot / 2, width: slot, y: padT, height: plotH,
+          fill: 'transparent',
+        });
+        hit.addEventListener('mousemove', (evt) => {
+          showTooltip(evt, `
+            <div class="t-title">${escapeHtml(h.label)}</div>
+            <div class="t-row"><span class="t-swatch" style="background:var(--series-1)"></span>${fmtInt(allowed)} autorisée(s)</div>
+            <div class="t-row"><span class="t-swatch" style="background:var(--status-critical)"></span>${fmtInt(h.blocked)} bloquée(s)</div>
+          `);
+        });
+        hit.addEventListener('mouseleave', hideTooltip);
+        group.appendChild(hit);
+
+        if (i % 3 === 0 || i === n - 1) {
+          const lbl = svgEl('text', { class: 'axis-label', x: cx, y: H - 4, 'text-anchor': 'middle' });
+          lbl.textContent = h.label;
+          svg.appendChild(lbl);
+        }
+
+        svg.appendChild(group);
+      });
+
+      svg.appendChild(svgEl('line', { class: 'baseline', x1: padL, x2: W - padR, y1: padT + plotH, y2: padT + plotH }));
+    }
+
+    function renderProviderChart(byProvider) {
+      const svg = document.getElementById('providerChart');
+      const empty = document.getElementById('providerEmpty');
+      svg.innerHTML = '';
+      const entries = Object.entries(byProvider || {}).sort((a, b) => b[1] - a[1]);
+      if (entries.length === 0) {
+        svg.setAttribute('viewBox', '0 0 100 100');
+        empty.hidden = false;
+        return;
+      }
+      empty.hidden = true;
+
+      const palette = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)'];
+      const shown = entries.slice(0, 3);
+      const rest = entries.slice(3).reduce((s, [, v]) => s + v, 0);
+      if (rest > 0) shown.push(['Autres', rest]);
+
+      const W = 320;
+      const rowH = 34;
+      const H = shown.length * rowH + 8;
+      const padL = 6, padR = 44, labelW = 78;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('preserveAspectRatio', 'none');
+
+      const maxVal = Math.max(1, ...shown.map(([, v]) => v));
+      const barMaxW = W - padL - padR - labelW;
+
+      shown.forEach(([name, value], i) => {
+        const y = 8 + i * rowH;
+        const barW = (value / maxVal) * barMaxW;
+        const color = palette[i] || 'var(--text-muted)';
+
+        const label = svgEl('text', {
+          class: 'provider-label', x: padL, y: y + rowH / 2 - 6, 'text-anchor': 'start',
+        });
+        label.textContent = name.length > 12 ? name.slice(0, 11) + '…' : name;
+        svg.appendChild(label);
+
+        const track = svgEl('rect', {
+          x: padL + labelW, y: y + rowH / 2, width: barMaxW, height: 10, rx: 4,
+          fill: 'var(--grid-line)',
+        });
+        svg.appendChild(track);
+
+        const bar = svgEl('rect', {
+          class: 'chart-bar', x: padL + labelW, y: y + rowH / 2, width: Math.max(barW, 3), height: 10, rx: 4,
+          fill: color,
+        });
+        svg.appendChild(bar);
+
+        const valLabel = svgEl('text', {
+          class: 'provider-value', x: padL + labelW + barMaxW + 6, y: y + rowH / 2 + 9, 'text-anchor': 'start',
+        });
+        valLabel.textContent = fmtInt(value);
+        svg.appendChild(valLabel);
+
+        const hit = svgEl('rect', { x: 0, y, width: W, height: rowH, fill: 'transparent' });
+        hit.addEventListener('mousemove', (evt) => {
+          showTooltip(evt, `
+            <div class="t-row"><span class="t-swatch" style="background:${color}"></span>${escapeHtml(name)} — ${fmtInt(value)} requête(s)</div>
+          `);
+        });
+        hit.addEventListener('mouseleave', hideTooltip);
+        svg.appendChild(hit);
+      });
+    }
+
+    let lastFetchOk = true;
+    async function loadDashboard() {
+      try {
+        const res = await fetch('/api/dashboard-summary');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const d = await res.json();
+        renderKpis(d);
+        renderHourlyChart(d.hourly || []);
+        renderProviderChart(d.by_provider_today || {});
+        const now = new Date();
+        document.getElementById('dashUpdated').innerHTML =
+          `<span class="dot"></span>maj ${now.toLocaleTimeString('fr-FR')}`;
+        lastFetchOk = true;
+      } catch (e) {
+        if (lastFetchOk) {
+          document.getElementById('dashUpdated').textContent = 'connexion au proxy indisponible';
+        }
+        lastFetchOk = false;
+      }
+    }
+
+    document.addEventListener('mousemove', (evt) => {
+      if (tooltip.classList.contains('visible')) moveTooltip(evt);
+    });
+
+    loadDashboard();
+    setInterval(loadDashboard, 20000);
+  </script>
 </body>
 </html>

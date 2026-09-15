@@ -34,6 +34,7 @@ async fn main() {
         .route("/api/rules", get(api_rules))
         .route("/api/rules/test", post(api_rules_test))
         .route("/api/compliance-report", get(api_compliance_report))
+        .route("/api/dashboard-summary", get(api_dashboard_summary))
         .route("/api/chargeback", get(api_chargeback))
         .route("/api/fallback", get(api_fallback))
         .route("/api/providers", get(api_providers))
@@ -378,6 +379,30 @@ async fn api_compliance_report(
                     .into_response(),
             }
         }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Relaie le résumé du tableau de bord (`GET /internal/dashboard-summary`
+/// côté proxy) pour la page d'accueil de l'admin.
+async fn api_dashboard_summary(State(state): State<AppState>) -> impl IntoResponse {
+    let url = format!(
+        "{}/internal/dashboard-summary",
+        state.proxy_url.trim_end_matches('/')
+    );
+    match state.http.get(&url).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("réponse du proxy illisible : {e}"),
+            )
+                .into_response(),
+        },
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             format!("erreur de connexion au proxy : {e}"),

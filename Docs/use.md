@@ -22,6 +22,18 @@ Ports définis dans `.env` (`PROXY_PORT`, `ADMIN_PORT`), modifiables si besoin. 
 
 > ⚠️ L'IP `162.19.241.44` est celle de la machine au moment de la rédaction (`hostname -I`) — à vérifier si elle change (DHCP, autre réseau). `make dev-run` affiche l'IP à jour à chaque lancement.
 
+## Tableau de bord (page d'accueil de l'admin)
+
+`http://162.19.241.44:45322/` — garde les 6 cartes de navigation (Règles, Compliance, FinOps, Fournisseurs, Test API, Fourmi 3D) et ajoute en dessous une vue d'ensemble avec :
+- 6 tuiles : requêtes aujourd'hui, coût estimé du jour, bloquées aujourd'hui, règles actives, PII/secrets masqués, fournisseurs configurés ;
+- un graphique en barres empilées des 24 dernières heures (autorisées / bloquées), avec infobulle au survol ;
+- un graphique de répartition des requêtes du jour par fournisseur.
+
+Se rafraîchit automatiquement toutes les 20 secondes. Calculé à la volée depuis le journal d'audit persistant (`data/audit.jsonl`) — pas de nouveau stockage.
+
+- Backend : `GET /internal/dashboard-summary` côté proxy, relayé par l'admin (`GET /api/dashboard-summary`).
+- Le coût du jour n'est estimé que pour les appels rattachés à une clé virtuelle avec un taux `cost_per_1k_tokens` renseigné (même limite que le chargeback FinOps ci-dessous).
+
 ## Passthrough proxy (`/v1/*`)
 
 Le proxy relaie toute requête `/v1/...` vers un fournisseur LLM configuré dans `config/providers.yaml` (monté en volume, éditable sans rebuild — redémarrer le conteneur `proxy` pour appliquer un changement).

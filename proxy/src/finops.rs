@@ -148,6 +148,22 @@ impl VirtualKeyStore {
         !self.keys.read().await.is_empty()
     }
 
+    pub async fn count(&self) -> usize {
+        self.keys.read().await.len()
+    }
+
+    /// Clé brute → taux de coût, pour les clés qui en ont un défini.
+    /// Utilisé par le tableau de bord pour estimer le coût du jour sans
+    /// dupliquer la logique déjà présente dans `chargeback_report`.
+    pub async fn cost_rates(&self) -> HashMap<String, f64> {
+        self.keys
+            .read()
+            .await
+            .iter()
+            .filter_map(|k| k.cost_per_1k_tokens.map(|rate| (k.key.clone(), rate)))
+            .collect()
+    }
+
     pub async fn resolve(&self, bearer: &str) -> Option<VirtualKeyConfig> {
         self.keys.read().await.iter().find(|k| k.key == bearer).cloned()
     }

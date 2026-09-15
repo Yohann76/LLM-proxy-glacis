@@ -123,6 +123,7 @@ async fn main() {
         .route("/internal/rules", get(list_rules))
         .route("/internal/rules/test", post(test_rules))
         .route("/internal/compliance-report", get(compliance_report))
+        .route("/internal/dashboard-summary", get(dashboard_summary))
         .route("/internal/chargeback", get(chargeback))
         .route(
             "/internal/virtual-keys",
@@ -329,6 +330,31 @@ async fn delete_virtual_key(
 /// vérifier un rechargement à chaud sans SSH dans le conteneur.
 async fn fallback_summary(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(state.fallback_store.summary().await)
+}
+
+/// Résumé pour le tableau de bord de la page d'accueil admin — un seul
+/// aller-retour pour tous les indicateurs (au lieu de composer côté
+/// client plusieurs des endpoints ci-dessus).
+async fn dashboard_summary(State(state): State<AppState>) -> Json<audit::DashboardSummary> {
+    let records = audit::read_all(&state.audit_log_path);
+    let cost_rates = state.virtual_keys.cost_rates().await;
+    let active_rules = state
+        .rule_engine
+        .summary()
+        .await
+        .get("count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let providers_count = state.config.providers.len();
+    let virtual_keys_count = state.virtual_keys.count().await;
+
+    Json(audit::compute_dashboard(
+        &records,
+        &cost_rates,
+        active_rules,
+        providers_count,
+        virtual_keys_count,
+    ))
 }
 
 /// Introspection des fournisseurs configurés (Étape 8, "Vue Fournisseurs") :

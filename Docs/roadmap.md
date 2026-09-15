@@ -216,6 +216,31 @@ Décision (validée avec l'utilisateur, cf. §"Prochaine étape" précédente) :
 
 **Correction du 2026-09-14 (nuit) : clé API du client, pas de `.env`.** Initialement, l'analyse retombait sur la clé serveur (`api_key_env`) faute de mieux. Ajout d'un champ "Clé API" dans `fourmi.html` (identique à celui de `test.html`), envoyé via `X-ProxyLLM-Api-Key` et jamais lu depuis l'environnement du conteneur admin. Les deux pages partagent la valeur via `localStorage` du navigateur (jamais persistée côté serveur). Sans clé saisie, erreur explicite plutôt qu'un fallback silencieux sur `.env`. Vérifié bout en bout (comparaison de l'`Authorization` reçu par un mock, avec/sans clé cliente).
 
+## Amélioration post-roadmap — Tableau de bord visuel sur la page d'accueil
+
+Les 8 étapes ci-dessus sont toutes faites. Demande utilisateur suivante : garder les 6 cartes de navigation de la page d'accueil telles quelles, mais ajouter en dessous un vrai tableau de bord avec des graphiques (nombre de requêtes, coût du jour, données bloquées, règles actives, etc.) — page d'accueil pensée pour "donner envie de s'intéresser au système", pas une liste de chiffres.
+
+**Fait le 2026-09-15.** Nouvel endpoint `GET /internal/dashboard-summary` côté proxy (relayé par `GET /api/dashboard-summary` côté admin), qui agrège en un seul aller-retour :
+- indicateurs du jour (minuit UTC → maintenant) : requêtes, bloquées, alertes, PII/secrets masqués, tokens, coût estimé ;
+- totaux depuis toujours : requêtes, bloquées ;
+- `active_rules` (compte du moteur de règles), `providers_count`, `virtual_keys_count` ;
+- série horaire glissante sur 24h (24 buckets, requêtes + bloquées par heure) ;
+- répartition du jour par fournisseur.
+
+Nouvelle fonction `audit::compute_dashboard()` (module `proxy/src/audit.rs`) : un seul passage sur le journal d'audit déjà existant (Étape 5), pas de nouveau stockage. Le coût du jour réutilise le même principe que le chargeback (Étape 6) — n'est estimé que pour les appels rattachés à une clé virtuelle avec un `cost_per_1k_tokens` renseigné ; nouvelle méthode `VirtualKeyStore::cost_rates()` pour exposer ces taux sans dupliquer la logique de `chargeback_report()`.
+
+Côté admin, `index.html` garde les 6 cartes inchangées et ajoute une section "Vue d'ensemble" en dessous :
+- 6 tuiles KPI (requêtes du jour, coût du jour, bloquées du jour, règles actives, PII masqués, fournisseurs configurés), valeurs compactées (1,2K / 4,2K$) ;
+- un graphique en barres empilées (autorisées en bleu / bloquées en rouge "critical") sur les 24 dernières heures, avec infobulle au survol de chaque heure ;
+- un graphique en barres horizontales de la répartition par fournisseur du jour, couleurs catégorielles ;
+- rafraîchissement automatique toutes les 20 s (pastille "maj HH:MM:SS"), sans rechargement de page.
+
+Suit la méthode du skill interne `dataviz` (procédure forme → couleur → validation → marques → interaction → accessibilité → rendu) : palette catégorielle + couleur de statut "bloqué" validées avec `scripts/validate_palette.js` contre les deux surfaces réelles du site (`#171a21` clair pour la palette catégorielle, `#0f1115` sombre) — tout passe (`ALL CHECKS PASS`), légende toujours présente pour ≥2 séries, graphiques en SVG fait main (pas de dépendance ajoutée) avec infobulles au survol, aucun graphique à double axe.
+
+Correction appliquée avant mise en prod : noms de fournisseurs insérés dans les infobulles étaient passés en `innerHTML` sans échappement — un nom de fournisseur peut en théorie contenir du texte arbitraire (dérivé de la ressource appelée). Ajout d'une fonction `escapeHtml()` (même motif que `finops.html`) partout où un nom vient des données plutôt que d'un texte fixe.
+
+Validé bout en bout : `GET /internal/dashboard-summary` et `GET /api/dashboard-summary` testés avec le vrai journal d'audit accumulé pendant cette session (34+ appels réels) — comptages par heure, par fournisseur et totaux cohérents. Un appel bloqué généré exprès (`DROP TABLE` via la règle de l'Étape 3) confirmé dans `blocked_today`/`blocked_total` et dans le bucket horaire correspondant. Conteneurs recréés et horodatage vérifié (`docker inspect --format '{{.Created}}'` du conteneur postérieur à l'image) pour écarter tout risque de servir une ancienne image, comme documenté plus haut dans cette session.
+
 ---
 
-**Prochaine étape à prioriser : Étape 3 (moteur de règles) ou Étape 4 (masquage PII), selon ce que tu veux poser en premier — à discuter.**
+**Toutes les étapes de la roadmap initiale sont faites. Dernière amélioration : le tableau de bord visuel ci-dessus.**
