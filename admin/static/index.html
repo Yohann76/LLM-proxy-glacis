@@ -21,9 +21,19 @@
     header p { margin: .25rem 0 0; color: #9aa2af; font-size: .9rem; }
     main {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 1rem;
-      padding: 2rem 2rem 1rem;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 1.25rem;
+      padding: 2rem;
+      width: 100%;
+    }
+    @media (max-width: 1000px) {
+      main { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 700px) {
+      main { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 420px) {
+      main { grid-template-columns: 1fr; }
     }
     .card {
       background: #171a21;
