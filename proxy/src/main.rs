@@ -1,4 +1,5 @@
 mod audit;
+mod finops;
 mod pii;
 mod rules;
 mod unite;
@@ -14,7 +15,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
-use unite::{LogsAxis, Store, UniteRecord};
+use unite::{LogsAxis, Store, TokenUsage, UniteRecord};
 
 #[derive(Debug, Deserialize, Clone)]
 struct ProviderConfig {
@@ -36,6 +37,7 @@ struct AppState {
     rule_engine: rules::RuleEngine,
     pii_masking_enabled: bool,
     audit_log_path: Arc<PathBuf>,
+    virtual_keys: finops::VirtualKeyStore,
 }
 
 #[tokio::main]
@@ -87,6 +89,14 @@ async fn main() {
         .into();
     println!("Journal d'audit : {}", audit_log_path.display());
 
+    // Clés API virtuelles & FinOps (Étape 6). Réhydratation des compteurs
+    // de consommation depuis le journal d'audit déjà chargé ci-dessus.
+    let virtual_keys_path =
+        std::env::var("PROXY_VIRTUAL_KEYS").unwrap_or_else(|_| "config/virtual_keys.yaml".to_string());
+    let virtual_keys = finops::VirtualKeyStore::load_initial(virtual_keys_path.into());
+    virtual_keys.rehydrate_from_audit(&audit::read_all(&audit_log_path)).await;
+    virtual_keys.spawn_watcher(std::time::Duration::from_secs(2));
+
     let state = AppState {
         config: Arc::new(config),
         http: reqwest::Client::new(),
@@ -94,6 +104,7 @@ async fn main() {
         rule_engine,
         pii_masking_enabled,
         audit_log_path: Arc::new(audit_log_path),
+        virtual_keys,
     };
 
     let app = Router::new()
@@ -103,6 +114,7 @@ async fn main() {
         .route("/internal/rules", get(list_rules))
         .route("/internal/rules/test", post(test_rules))
         .route("/internal/compliance-report", get(compliance_report))
+        .route("/internal/chargeback", get(chargeback))
         .route("/v1/*rest", any(passthrough))
         .with_state(state);
 
@@ -232,6 +244,44 @@ async fn compliance_report(
     }
 }
 
+/// Rapport chargeback (Étape 6) : consommation de tokens et coût estimé
+/// par clé API virtuelle. Clés brutes jamais exposées (masquées côté
+/// `finops::VirtualKeyStore`).
+async fn chargeback(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let entries = state.virtual_keys.chargeback_report().await;
+    Json(json!({
+        "enforced": state.virtual_keys.is_enforced().await,
+        "keys": entries,
+    }))
+}
+
+/// Toutes les valeurs nécessaires pour construire et journaliser une
+/// unité d'observabilité (§2.1 du cahier des charges). Struct plutôt que
+/// des paramètres positionnels : la liste est longue (9 axes + Étapes
+/// 3/4/6) et des champs mal ordonnés à un site d'appel ne seraient pas
+/// détectés par le compilateur si les types coïncident.
+struct UniteInput {
+    request_id: String,
+    action: String,
+    acteur: String,
+    contexte: String,
+    ressource: String,
+    relation: String,
+    objectif: String,
+    mission: String,
+    method: String,
+    path: String,
+    status: u16,
+    latency_ms: u128,
+    request_bytes: usize,
+    risques: String,
+    realisation: String,
+    pii_masked: bool,
+    pii_categories: Vec<String>,
+    virtual_key: Option<String>,
+    tokens: TokenUsage,
+}
+
 /// Relaie toute requête `/v1/*` vers le fournisseur LLM configuré.
 /// Le fournisseur est choisi via l'en-tête `X-ProxyLLM-Provider`, ou à
 /// défaut le `default_provider` du fichier de config.
@@ -287,6 +337,99 @@ async fn passthrough(
         None => provider_name.clone(),
     };
 
+    // Clés API virtuelles (Étape 6) : question d'identité/accès, traitée
+    // avant tout le reste. Sans clé configurée (fichier vide), le proxy
+    // reste ouvert et se comporte exactement comme avant cette étape.
+    let client_bearer = header_str(&headers, "authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let resolved_key = match &client_bearer {
+        Some(token) => state.virtual_keys.resolve(token).await,
+        None => None,
+    };
+    let virtual_key_enforced = state.virtual_keys.is_enforced().await;
+
+    if virtual_key_enforced && resolved_key.is_none() {
+        emit_unite(
+            &state,
+            UniteInput {
+                request_id,
+                action,
+                acteur: "inconnu".to_string(),
+                contexte,
+                ressource,
+                relation,
+                objectif,
+                mission,
+                method: method_str,
+                path,
+                status: StatusCode::UNAUTHORIZED.as_u16(),
+                latency_ms: start.elapsed().as_millis(),
+                request_bytes,
+                risques: "cle virtuelle invalide ou absente".to_string(),
+                realisation: "acces refuse".to_string(),
+                pii_masked: false,
+                pii_categories: Vec::new(),
+                virtual_key: None,
+                tokens: TokenUsage::default(),
+            },
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            "clé API virtuelle invalide ou absente (en-tête Authorization: Bearer <clé>)",
+        )
+            .into_response();
+    }
+
+    let acteur = match &resolved_key {
+        Some(vk) => vk.name.clone(),
+        None => acteur,
+    };
+
+    // Quota (Étape 6) : vérifié sur la consommation connue AVANT cet appel
+    // (mise à jour asynchrone après chaque réponse — cohérence à terme,
+    // pas une garantie stricte anti-rafale, cf. Docs/roadmap.md).
+    if let Some(vk) = &resolved_key {
+        if let Some(quota) = vk.quota_tokens {
+            let used = state.virtual_keys.consumption_of(&vk.key).await;
+            if used >= quota {
+                emit_unite(
+                    &state,
+                    UniteInput {
+                        request_id,
+                        action,
+                        acteur,
+                        contexte,
+                        ressource,
+                        relation,
+                        objectif,
+                        mission,
+                        method: method_str,
+                        path,
+                        status: StatusCode::FORBIDDEN.as_u16(),
+                        latency_ms: start.elapsed().as_millis(),
+                        request_bytes,
+                        risques: format!("quota depasse : {used}/{quota} tokens"),
+                        realisation: "acces refuse".to_string(),
+                        pii_masked: false,
+                        pii_categories: Vec::new(),
+                        virtual_key: Some(vk.key.clone()),
+                        tokens: TokenUsage::default(),
+                    },
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "quota de tokens dépassé pour la clé « {} » ({used}/{quota})",
+                        vk.name
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     // Moteur de règles symboliques (Étape 3) : évaluation synchrone, sur le
     // chemin critique, avant tout appel réseau au fournisseur — c'est ce qui
     // garde le surcoût largement sous les 5 ms visés (comparaisons de
@@ -302,28 +445,40 @@ async fn passthrough(
             action: &action,
         })
         .await;
-    let risques = decision.summary();
+    let mut risques = decision.summary();
+    if let Some(vk) = &resolved_key {
+        if let Some(quota) = vk.quota_tokens {
+            let used = state.virtual_keys.consumption_of(&vk.key).await;
+            if quota > 0 && (used as f64) >= (quota as f64) * 0.8 {
+                risques = format!("{risques} ; alerte surconsommation : {used}/{quota} tokens");
+            }
+        }
+    }
 
     if let Some(rule_name) = decision.blocked_by.clone() {
         emit_unite(
             &state,
-            request_id,
-            action,
-            acteur,
-            contexte,
-            ressource,
-            relation,
-            objectif,
-            mission,
-            method_str,
-            path,
-            StatusCode::FORBIDDEN.as_u16(),
-            start.elapsed().as_millis(),
-            request_bytes,
-            risques.clone(),
-            format!("bloque par la regle '{rule_name}'"),
-            false,
-            Vec::new(),
+            UniteInput {
+                request_id,
+                action,
+                acteur,
+                contexte,
+                ressource,
+                relation,
+                objectif,
+                mission,
+                method: method_str,
+                path,
+                status: StatusCode::FORBIDDEN.as_u16(),
+                latency_ms: start.elapsed().as_millis(),
+                request_bytes,
+                risques: risques.clone(),
+                realisation: format!("bloque par la regle '{rule_name}'"),
+                pii_masked: false,
+                pii_categories: Vec::new(),
+                virtual_key: resolved_key.as_ref().map(|k| k.key.clone()),
+                tokens: TokenUsage::default(),
+            },
         );
         return (
             StatusCode::FORBIDDEN,
@@ -379,23 +534,27 @@ async fn passthrough(
     let Some(provider) = state.config.providers.get(&provider_name) else {
         emit_unite(
             &state,
-            request_id,
-            action,
-            acteur,
-            contexte,
-            ressource,
-            relation,
-            objectif,
-            mission,
-            method_str,
-            path,
-            StatusCode::BAD_GATEWAY.as_u16(),
-            start.elapsed().as_millis(),
-            request_bytes,
-            risques,
-            "fournisseur inconnu".to_string(),
-            pii_masked,
-            pii_categories,
+            UniteInput {
+                request_id,
+                action,
+                acteur,
+                contexte,
+                ressource,
+                relation,
+                objectif,
+                mission,
+                method: method_str,
+                path,
+                status: StatusCode::BAD_GATEWAY.as_u16(),
+                latency_ms: start.elapsed().as_millis(),
+                request_bytes,
+                risques,
+                realisation: "fournisseur inconnu".to_string(),
+                pii_masked,
+                pii_categories,
+                virtual_key: resolved_key.as_ref().map(|k| k.key.clone()),
+                tokens: TokenUsage::default(),
+            },
         );
         return (
             StatusCode::BAD_GATEWAY,
@@ -415,23 +574,27 @@ async fn passthrough(
             _ => {
                 emit_unite(
                     &state,
-                    request_id,
-                    action,
-                    acteur,
-                    contexte,
-                    ressource,
-                    relation,
-                    objectif,
-                    mission,
-                    method_str,
-                    path,
-                    StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-                    start.elapsed().as_millis(),
-                    request_bytes,
-                    risques,
-                    "clé API manquante".to_string(),
-                    pii_masked,
-                    pii_categories,
+                    UniteInput {
+                        request_id,
+                        action,
+                        acteur,
+                        contexte,
+                        ressource,
+                        relation,
+                        objectif,
+                        mission,
+                        method: method_str,
+                        path,
+                        status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                        latency_ms: start.elapsed().as_millis(),
+                        request_bytes,
+                        risques,
+                        realisation: "clé API manquante".to_string(),
+                        pii_masked,
+                        pii_categories,
+                        virtual_key: resolved_key.as_ref().map(|k| k.key.clone()),
+                        tokens: TokenUsage::default(),
+                    },
                 );
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -478,23 +641,27 @@ async fn passthrough(
         Err(e) => {
             emit_unite(
                 &state,
-                request_id,
-                action,
-                acteur,
-                contexte,
-                ressource,
-                relation,
-                objectif,
-                mission,
-                method_str,
-                path,
-                StatusCode::BAD_GATEWAY.as_u16(),
-                start.elapsed().as_millis(),
-                request_bytes,
-                risques,
-                format!("erreur fournisseur : {e}"),
-                pii_masked,
-                pii_categories,
+                UniteInput {
+                    request_id,
+                    action,
+                    acteur,
+                    contexte,
+                    ressource,
+                    relation,
+                    objectif,
+                    mission,
+                    method: method_str,
+                    path,
+                    status: StatusCode::BAD_GATEWAY.as_u16(),
+                    latency_ms: start.elapsed().as_millis(),
+                    request_bytes,
+                    risques,
+                    realisation: format!("erreur fournisseur : {e}"),
+                    pii_masked,
+                    pii_categories,
+                    virtual_key: resolved_key.as_ref().map(|k| k.key.clone()),
+                    tokens: TokenUsage::default(),
+                },
             );
             return (StatusCode::BAD_GATEWAY, format!("erreur fournisseur : {e}")).into_response();
         }
@@ -514,14 +681,6 @@ async fn passthrough(
     } else {
         format!("erreur http {}", status.as_u16())
     };
-    let realisation = if pii_mapping.is_empty() {
-        realisation
-    } else {
-        format!(
-            "{realisation} ; {} valeur(s) PII reinjectee(s) dans la reponse",
-            pii_mapping.len()
-        )
-    };
 
     let mut out_headers = HeaderMap::new();
     for (name, value) in resp.headers().iter() {
@@ -531,53 +690,128 @@ async fn passthrough(
         out_headers.insert(name.clone(), value.clone());
     }
 
-    emit_unite(
-        &state,
-        request_id,
-        action,
-        acteur,
-        contexte,
-        ressource,
-        relation,
-        objectif,
-        mission,
-        method_str,
-        path,
-        status.as_u16(),
-        start.elapsed().as_millis(),
-        request_bytes,
-        risques,
-        realisation,
-        pii_masked,
-        pii_categories,
-    );
+    // Réinjection (Étape 4) et suivi précis des tokens (Étape 6) exigent
+    // tous les deux de lire le corps de la réponse — donc de renoncer au
+    // streaming zero-copy pour CET appel précis. Sans PII à réinjecter et
+    // sans clé virtuelle à suivre (le cas par défaut), le streaming
+    // zero-copy reste intact : c'est le compromis, assumé et documenté.
+    let must_buffer = !pii_mapping.is_empty() || resolved_key.is_some();
 
-    // Réinjection (Étape 4) : si des PII ont été masquées dans la requête,
-    // on ne peut plus streamer tel quel la réponse — il faut la bufferiser
-    // entièrement pour substituer les placeholders par les vraies valeurs
-    // avant de la renvoyer au client. Compromis assumé : pas de streaming
-    // SSE token-par-token sur les appels où une réinjection est nécessaire.
-    // Sans PII détectée (cas normal), le streaming zero-copy reste intact.
-    if pii_mapping.is_empty() {
+    if !must_buffer {
+        emit_unite(
+            &state,
+            UniteInput {
+                request_id,
+                action,
+                acteur,
+                contexte,
+                ressource,
+                relation,
+                objectif,
+                mission,
+                method: method_str,
+                path,
+                status: status.as_u16(),
+                latency_ms: start.elapsed().as_millis(),
+                request_bytes,
+                risques,
+                realisation,
+                pii_masked,
+                pii_categories,
+                virtual_key: None,
+                tokens: TokenUsage::default(),
+            },
+        );
         let stream = resp.bytes_stream();
-        (status, out_headers, Body::from_stream(stream)).into_response()
+        return (status, out_headers, Body::from_stream(stream)).into_response();
+    }
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            emit_unite(
+                &state,
+                UniteInput {
+                    request_id,
+                    action,
+                    acteur,
+                    contexte,
+                    ressource,
+                    relation,
+                    objectif,
+                    mission,
+                    method: method_str,
+                    path,
+                    status: StatusCode::BAD_GATEWAY.as_u16(),
+                    latency_ms: start.elapsed().as_millis(),
+                    request_bytes,
+                    risques,
+                    realisation: format!("erreur de lecture de la réponse fournisseur : {e}"),
+                    pii_masked,
+                    pii_categories,
+                    virtual_key: resolved_key.as_ref().map(|k| k.key.clone()),
+                    tokens: TokenUsage::default(),
+                },
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("erreur de lecture de la réponse fournisseur : {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let final_bytes = if pii_mapping.is_empty() {
+        bytes
     } else {
-        let bytes = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    format!("erreur de lecture de la réponse fournisseur : {e}"),
-                )
-                    .into_response()
-            }
-        };
-        let reinjected = match std::str::from_utf8(&bytes) {
+        match std::str::from_utf8(&bytes) {
             Ok(text) => Bytes::from(pii::reinject(text, &pii_mapping)),
             Err(_) => bytes,
-        };
-        (status, out_headers, Body::from(reinjected)).into_response()
+        }
+    };
+
+    let tokens = finops::extract_usage(&final_bytes).unwrap_or_default();
+    if let Some(vk) = &resolved_key {
+        if !tokens.is_empty() {
+            state.virtual_keys.record_usage(&vk.key, tokens.total_tokens).await;
+        }
     }
+
+    let realisation = if pii_mapping.is_empty() {
+        realisation
+    } else {
+        format!(
+            "{realisation} ; {} valeur(s) PII reinjectee(s) dans la reponse",
+            pii_mapping.len()
+        )
+    };
+
+    emit_unite(
+        &state,
+        UniteInput {
+            request_id,
+            action,
+            acteur,
+            contexte,
+            ressource,
+            relation,
+            objectif,
+            mission,
+            method: method_str,
+            path,
+            status: status.as_u16(),
+            latency_ms: start.elapsed().as_millis(),
+            request_bytes,
+            risques,
+            realisation,
+            pii_masked,
+            pii_categories,
+            virtual_key: resolved_key.as_ref().map(|k| k.key.clone()),
+            tokens,
+        },
+    );
+
+    (status, out_headers, Body::from(final_bytes)).into_response()
 }
 
 /// Best-effort : tente d'extraire le champ "model" du corps JSON de la
@@ -641,48 +875,30 @@ fn extract_action(body: &Bytes, method: &str, path: &str) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_unite(
-    state: &AppState,
-    request_id: String,
-    action: String,
-    acteur: String,
-    contexte: String,
-    ressource: String,
-    relation: String,
-    objectif: String,
-    mission: String,
-    method: String,
-    path: String,
-    status: u16,
-    latency_ms: u128,
-    request_bytes: usize,
-    risques: String,
-    realisation: String,
-    pii_masked: bool,
-    pii_categories: Vec<String>,
-) {
+fn emit_unite(state: &AppState, input: UniteInput) {
     let record = UniteRecord {
-        request_id,
+        request_id: input.request_id,
         timestamp_unix_ms: unite::now_unix_ms(),
-        action,
-        acteur,
-        contexte,
-        ressource,
+        action: input.action,
+        acteur: input.acteur,
+        contexte: input.contexte,
+        ressource: input.ressource,
         logs: LogsAxis {
-            method,
-            path,
-            status,
-            latency_ms,
-            request_bytes,
+            method: input.method,
+            path: input.path,
+            status: input.status,
+            latency_ms: input.latency_ms,
+            request_bytes: input.request_bytes,
         },
-        risques,
-        relation,
-        realisation,
-        objectif,
-        mission,
-        pii_masked,
-        pii_categories,
+        risques: input.risques,
+        relation: input.relation,
+        realisation: input.realisation,
+        objectif: input.objectif,
+        mission: input.mission,
+        pii_masked: input.pii_masked,
+        pii_categories: input.pii_categories,
+        virtual_key: input.virtual_key,
+        tokens: input.tokens,
     };
 
     let http = state.http.clone();

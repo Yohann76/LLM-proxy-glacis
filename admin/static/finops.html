@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProxyLLM Glacis — FinOps</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #262a33;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; }
+    header a { color: #7aa2f7; font-size: .85rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    .toolbar { margin-left: auto; }
+    button {
+      background: #3b6fe0;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: .45rem 1.1rem;
+      font-size: .8rem;
+      cursor: pointer;
+    }
+    button:hover { background: #4c7cf0; }
+
+    main { max-width: 960px; margin: 0 auto; padding: 2rem; }
+    .status-banner {
+      padding: .8rem 1.1rem;
+      border-radius: 8px;
+      font-size: .85rem;
+      margin-bottom: 1.5rem;
+      border: 1px solid #262a33;
+    }
+    .status-banner.open { background: #1c2440; color: #9ab4ff; }
+    .status-banner.closed { background: #1f3b2c; color: #7ee787; }
+
+    .key-card {
+      background: #171a21;
+      border: 1px solid #262a33;
+      border-radius: 8px;
+      padding: 1.1rem 1.3rem;
+      margin-bottom: 1rem;
+    }
+    .key-card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+    .key-card h2 { margin: 0; font-size: 1rem; }
+    .key-card .masked { font-family: ui-monospace, monospace; color: #9aa2af; font-size: .8rem; }
+    .badge {
+      font-size: .68rem;
+      padding: .15rem .55rem;
+      border-radius: 999px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge.ok { background: #1f3b2c; color: #7ee787; }
+    .badge.near { background: #3b2f1f; color: #fbbf7e; }
+    .badge.exceeded { background: #3b1f1f; color: #ff7b72; }
+    .badge.unlimited { background: #2a2f3a; color: #9aa2af; }
+
+    .metrics { display: flex; gap: 2rem; margin-top: .8rem; flex-wrap: wrap; font-size: .82rem; }
+    .metrics .metric .value { font-size: 1.1rem; font-weight: 600; }
+    .metrics .metric .label { color: #9aa2af; font-size: .72rem; }
+
+    .bar-track {
+      margin-top: .8rem;
+      height: 8px;
+      border-radius: 999px;
+      background: #0c0e12;
+      overflow: hidden;
+    }
+    .bar-fill { height: 100%; border-radius: 999px; }
+    .bar-fill.ok { background: #3b6fe0; }
+    .bar-fill.near { background: #fbbf7e; }
+    .bar-fill.exceeded { background: #ff7b72; }
+
+    .empty { color: #9aa2af; font-size: .9rem; padding: 2rem; text-align: center; border: 1px dashed #262a33; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>FinOps — Clés API virtuelles</h1>
+    <a href="/">&larr; dashboard</a>
+    <div class="toolbar">
+      <button id="refresh">Actualiser</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="statusBanner" class="status-banner open">Chargement…</div>
+    <div id="content"></div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
+    }
+
+    function keyCard(k) {
+      let statusBadge = '<span class="badge unlimited">illimité</span>';
+      let barClass = 'ok';
+      if (k.quota_tokens != null) {
+        if (k.quota_exceeded) { statusBadge = '<span class="badge exceeded">quota dépassé</span>'; barClass = 'exceeded'; }
+        else if (k.near_quota) { statusBadge = '<span class="badge near">proche du quota</span>'; barClass = 'near'; }
+        else { statusBadge = '<span class="badge ok">ok</span>'; }
+      }
+
+      const pct = k.percent_used != null ? Math.min(100, k.percent_used).toFixed(1) : null;
+      const bar = k.quota_tokens != null
+        ? `<div class="bar-track"><div class="bar-fill ${barClass}" style="width:${pct}%"></div></div>`
+        : '';
+
+      const cost = k.estimated_cost != null ? `$${k.estimated_cost.toFixed(4)}` : '—';
+      const quota = k.quota_tokens != null ? k.quota_tokens.toLocaleString('fr-FR') : 'illimité';
+
+      return `<div class="key-card">
+        <div class="top">
+          <h2>${escapeHtml(k.name)}</h2>
+          ${statusBadge}
+        </div>
+        <div class="masked">${escapeHtml(k.key_masked)}</div>
+        ${bar}
+        <div class="metrics">
+          <div class="metric"><div class="value">${k.tokens_used.toLocaleString('fr-FR')}</div><div class="label">Tokens consommés</div></div>
+          <div class="metric"><div class="value">${quota}</div><div class="label">Quota</div></div>
+          <div class="metric"><div class="value">${pct != null ? pct + '%' : '—'}</div><div class="label">Utilisé</div></div>
+          <div class="metric"><div class="value">${k.requests.toLocaleString('fr-FR')}</div><div class="label">Requêtes</div></div>
+          <div class="metric"><div class="value">${cost}</div><div class="label">Coût estimé (chargeback)</div></div>
+        </div>
+      </div>`;
+    }
+
+    async function load() {
+      const banner = $('statusBanner');
+      const content = $('content');
+      banner.textContent = 'Chargement…';
+      content.innerHTML = '';
+      try {
+        const res = await fetch('/api/chargeback');
+        const data = await res.json();
+
+        if (data.enforced) {
+          banner.className = 'status-banner closed';
+          banner.textContent = '🔒 Authentification requise : le proxy exige une clé virtuelle valide (Authorization: Bearer <clé>) sur /v1/*.';
+        } else {
+          banner.className = 'status-banner open';
+          banner.textContent = 'ℹ️ Aucune clé virtuelle configurée dans config/virtual_keys.yaml — le proxy reste ouvert (pas d\'authentification requise). Ajoute des clés dans ce fichier pour activer le contrôle d\'accès et le suivi FinOps.';
+        }
+
+        if (!data.keys || data.keys.length === 0) {
+          content.innerHTML = '<div class="empty">Aucune clé virtuelle configurée.</div>';
+          return;
+        }
+        content.innerHTML = data.keys.map(keyCard).join('');
+      } catch (e) {
+        banner.className = 'status-banner closed';
+        banner.textContent = 'Erreur réseau : ' + e;
+      }
+    }
+
+    $('refresh').addEventListener('click', load);
+    load();
+  </script>
+</body>
+</html>

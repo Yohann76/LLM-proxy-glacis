@@ -34,6 +34,7 @@ async fn main() {
         .route("/api/rules", get(api_rules))
         .route("/api/rules/test", post(api_rules_test))
         .route("/api/compliance-report", get(api_compliance_report))
+        .route("/api/chargeback", get(api_chargeback))
         .fallback_service(ServeDir::new("static").append_index_html_on_directories(true))
         .with_state(state);
 
@@ -59,6 +60,9 @@ struct TestRequest {
     path: String,
     body: Option<String>,
     api_key: Option<String>,
+    /// Étape 6 : clé API virtuelle, envoyée en `Authorization: Bearer` —
+    /// distincte de `api_key` (qui surcharge la clé du VRAI fournisseur).
+    virtual_key: Option<String>,
 }
 
 fn default_method() -> String {
@@ -84,6 +88,9 @@ async fn api_test(State(state): State<AppState>, Json(req): Json<TestRequest>) -
     }
     if let Some(api_key) = req.api_key.filter(|k| !k.is_empty()) {
         builder = builder.header("x-proxyllm-api-key", api_key);
+    }
+    if let Some(vk) = req.virtual_key.filter(|k| !k.is_empty()) {
+        builder = builder.header("authorization", format!("Bearer {vk}"));
     }
     if let Some(body) = req.body {
         builder = builder.body(body);
@@ -367,6 +374,28 @@ async fn api_compliance_report(
                     .into_response(),
             }
         }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("erreur de connexion au proxy : {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Relaie le rapport chargeback (`GET /internal/chargeback` côté proxy —
+/// clés virtuelles jamais exposées en clair, toujours masquées) pour la
+/// vue FinOps de l'admin.
+async fn api_chargeback(State(state): State<AppState>) -> impl IntoResponse {
+    let url = format!("{}/internal/chargeback", state.proxy_url.trim_end_matches('/'));
+    match state.http.get(&url).send().await {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                format!("réponse du proxy illisible : {e}"),
+            )
+                .into_response(),
+        },
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             format!("erreur de connexion au proxy : {e}"),

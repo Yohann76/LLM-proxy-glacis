@@ -92,6 +92,38 @@ Page dédiée : **http://162.19.241.44:45322/compliance.html** (carte "Complianc
 - **Téléchargement JSON ou PDF** en un clic ("1-Click Compliance Report") — le PDF reprend le même contenu, mis en page en texte simple (pas de design élaboré, l'objectif est la traçabilité).
 - Backend : `GET /internal/compliance-report?format=json|pdf&since=...&until=...` côté proxy, relayé tel quel par l'admin (`GET /api/compliance-report`) — le PDF n'est jamais rechargé en mémoire, juste transmis en bytes.
 
+## Clés API virtuelles & FinOps
+
+Fichier : **`config/virtual_keys.yaml`** (monté en volume, rechargé à chaud en ~2 s — même mécanisme que `rules.yaml`).
+
+```yaml
+keys:
+  - key: "vk-marketing-team-a1b2c3"
+    name: "Équipe Marketing"
+    quota_tokens: 500000
+    cost_per_1k_tokens: 0.002   # optionnel — TON tarif interne, pas le vrai prix du fournisseur
+```
+
+- **`keys: []` (défaut livré)** : le proxy reste **ouvert**, comme avant cette fonctionnalité — aucune authentification requise.
+- **Dès qu'une clé est définie** : le proxy exige `Authorization: Bearer <clé>` sur tout appel `/v1/*` — `401` sans clé valide.
+- La clé résolue devient l'axe **Acteur** de l'observabilité (remplace l'IP/en-tête — c'est une identité authentifiée, plus fiable).
+- **Quota** (`quota_tokens`, optionnel) : dépassé → `403`. Alerte dès 80 % du quota (visible dans l'axe Risques), sans bloquer.
+- **Suivi des tokens** : extrait de la réponse du fournisseur (`usage.total_tokens`). ⚠️ Nécessite de bufferiser la réponse (perte du streaming zero-copy) — uniquement pour les appels authentifiés par une clé virtuelle, comme la réinjection PII de l'Étape 4.
+- **Persistant** : les compteurs sont réhydratés au démarrage depuis `data/audit.jsonl` (pas de mécanisme de stockage séparé) — survivent aux redémarrages du conteneur.
+- Les clés brutes ne sont **jamais exposées** par l'admin ou les endpoints `/internal/*` — toujours masquées (`****xxxx`).
+
+### Vue FinOps (dans l'admin)
+
+Page dédiée : **http://162.19.241.44:45322/finops.html** (carte "FinOps" du dashboard).
+
+- Bandeau d'état : proxy ouvert (aucune clé) ou fermé (authentification requise).
+- Une carte par clé virtuelle : nom, clé masquée, tokens consommés, quota, barre de progression (bleu → orange proche du quota → rouge dépassé), nombre de requêtes, coût estimé.
+- Backend : `GET /internal/chargeback` côté proxy, relayé par l'admin (`GET /api/chargeback`).
+
+### Tester l'authentification depuis l'admin
+
+`test.html` a un champ **"Clé virtuelle"** (distinct du champ "Clé API" existant) — envoyé en `Authorization: Bearer <valeur>` vers le proxy, pour tester `config/virtual_keys.yaml` sans terminal. Sauvegardé dans le `localStorage` du navigateur (séparément de la clé API), jamais dans `.env`.
+
 ## Observabilité (méthode Unité)
 
 Chaque appel `/v1/*` est journalisé en JSON structuré (`docker logs proxyllm-proxy`), avec les 9 axes (Acteur, Contexte, Ressource, Logs, Risques, Relation, Réalisation, Objectif, Mission) **plus un champ `action`** : le dernier message `"role": "user"` du corps JSON (`messages[]`, format OpenAI chat), tronqué à 80 caractères — c'est l'intention réelle envoyée au LLM, pas juste la forme technique de l'appel HTTP. Fallback sur `méthode + chemin` si le corps n'est pas exploitable (GET, format non conversationnel).

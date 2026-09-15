@@ -39,6 +39,7 @@
     #provider { width: 110px; }
     #model { width: 150px; }
     #apiKey { width: 150px; }
+    #virtualKey { width: 150px; }
     button {
       background: #3b6fe0;
       color: white;
@@ -152,6 +153,7 @@
       <input id="provider" placeholder="Fournisseur" title="X-ProxyLLM-Provider — vide = default_provider" />
       <input id="model" value="gpt-4.1-nano" placeholder="Modèle" />
       <input id="apiKey" type="password" placeholder="Clé API (sk-...)" autocomplete="off" title="Clé du client, jamais lue depuis .env — partagée avec fourmi.html via ce navigateur" />
+      <input id="virtualKey" type="password" placeholder="Clé virtuelle (Étape 6)" autocomplete="off" title="Envoyée en Authorization: Bearer — pour tester config/virtual_keys.yaml. Vide si aucune clé virtuelle configurée." />
       <button id="reset" class="secondary" type="button">Nouvelle conversation</button>
     </div>
   </header>
@@ -170,6 +172,7 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const API_KEY_STORAGE = 'proxyllm_api_key';
+    const VIRTUAL_KEY_STORAGE = 'proxyllm_virtual_key';
     const chatEl = $('chat');
     let messages = [];
     let chatStarted = false;
@@ -177,12 +180,20 @@
     try {
       const savedKey = localStorage.getItem(API_KEY_STORAGE);
       if (savedKey) $('apiKey').value = savedKey;
+      const savedVk = localStorage.getItem(VIRTUAL_KEY_STORAGE);
+      if (savedVk) $('virtualKey').value = savedVk;
     } catch (_) {}
 
     $('apiKey').addEventListener('change', (e) => {
       try {
         if (e.target.value) localStorage.setItem(API_KEY_STORAGE, e.target.value);
         else localStorage.removeItem(API_KEY_STORAGE);
+      } catch (_) {}
+    });
+    $('virtualKey').addEventListener('change', (e) => {
+      try {
+        if (e.target.value) localStorage.setItem(VIRTUAL_KEY_STORAGE, e.target.value);
+        else localStorage.removeItem(VIRTUAL_KEY_STORAGE);
       } catch (_) {}
     });
 
@@ -269,6 +280,7 @@
           messages,
         }),
         api_key: $('apiKey').value.trim(),
+        virtual_key: $('virtualKey').value.trim(),
       };
 
       try {

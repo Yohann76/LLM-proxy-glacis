@@ -123,10 +123,26 @@ Validé bout en bout : 5 requêtes de test (1 bloquée, 1 alerte, 1 avec PII/sec
 
 ## Étape 6 — FinOps & administration
 
-- [ ] Clés API virtuelles
-- [ ] Suivi de consommation de tokens par acteur/équipe
-- [ ] Quotas, budgets, alertes de surconsommation
-- [ ] Vue chargeback
+- [x] Clés API virtuelles
+- [x] Suivi de consommation de tokens par acteur/équipe
+- [x] Quotas, budgets, alertes de surconsommation
+- [x] Vue chargeback
+
+**Fait le 2026-09-14 (nuit).** Module `proxy/src/finops.rs`. Fichier `config/virtual_keys.yaml` (même schéma hot-reload ~2s que `rules.yaml`).
+
+**Comportement par défaut inchangé.** Fichier vide (`keys: []`, livré tel quel) = proxy ouvert, exactement comme avant cette étape. Dès qu'au moins une clé est définie, le proxy exige `Authorization: Bearer <clé>` sur tout `/v1/*` — 401 sinon. Décision volontaire pour ne rien casser tant que l'admin n'active pas explicitement le contrôle d'accès.
+
+**Identité** : la clé résolue remplace l'axe Acteur dérivé de l'IP/en-tête (plus fiable — authentifié, pas juste déclaré). Le bearer du client n'atteint jamais le vrai fournisseur (déjà exclu des en-têtes forwardés, remplacé par la vraie clé provider comme avant).
+
+**Quota** : `quota_tokens` optionnel par clé, vérifié en mémoire (rapide, budget < 5 ms) sur la consommation connue *avant* l'appel — cohérence à terme, pas une garantie stricte anti-rafale sur des requêtes concurrentes (limite documentée, acceptable pour du suivi FinOps). Dépassé → `403`. Alerte de surconsommation dès 80 % du quota, remontée dans l'axe Risques (`"alerte surconsommation : X/Y tokens"`), sans bloquer.
+
+**Suivi des tokens** : extrait du champ `usage` de la réponse fournisseur (format OpenAI). Compromis assumé : ça nécessite de lire toute la réponse, donc de renoncer au streaming zero-copy — uniquement pour les appels authentifiés par une clé virtuelle (comme la réinjection PII de l'Étape 4, dont c'est la même contrainte). Sans clé virtuelle configurée, aucun impact : le streaming reste intact.
+
+**Persistance sans nouveau mécanisme** : les compteurs de consommation ne sont pas sauvegardés séparément — ils sont réhydratés au démarrage depuis le journal d'audit de l'Étape 5 (déjà persistant), en resommant les tokens par clé virtuelle. Testé : après redémarrage du conteneur, la consommation cumulée est retrouvée à l'identique.
+
+**Chargeback** : `GET /internal/chargeback` — une ligne par clé configurée (nom, tokens consommés, requêtes, quota, % utilisé, coût estimé si `cost_per_1k_tokens` renseigné — un taux interne défini par l'admin, pas le vrai tarif du fournisseur). Clés brutes **jamais exposées**, toujours masquées (`****xxxx`) — y compris dans cet endpoint interne, puisque proxy et admin restent sans authentification propre.
+
+Validé bout en bout avec un mock retournant un vrai champ `usage` : sans clé → 401 ; clé invalide → 401 ; bonne clé → 200 + acteur = nom de la clé ; quota de 30 tokens consommé sur 2 appels (15 chacun) → 3e appel bloqué (403, "30/30 tokens") ; chargeback exact (50 % puis 100 %, coût estimé correct) ; persistance confirmée après redémarrage.
 
 ## Étape 7 — Fallback / Failover
 
@@ -139,7 +155,7 @@ Validé bout en bout : 5 requêtes de test (1 bloquée, 1 alerte, 1 avec PII/sec
 - [x] Vue Règles (éditeur Policy-as-Code) — liste + testeur de décision, `rules.html` (cf. Étape 3)
 - [x] Vue Observabilité (exploration des séquences par la grille Unité) — fusionnée dans la vue Fourmi 3D, voir plus bas
 - [x] Vue Compliance (génération/téléchargement des rapports) — `compliance.html` (cf. Étape 5)
-- [ ] Vue FinOps (coûts, quotas, alertes)
+- [x] Vue FinOps (coûts, quotas, alertes) — `finops.html` (cf. Étape 6)
 - [ ] Vue Fournisseurs (config LLM + fallback)
 - [ ] Gestion des accès (clés API virtuelles)
 

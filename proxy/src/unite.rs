@@ -32,6 +32,23 @@ pub struct LogsAxis {
     pub request_bytes: usize,
 }
 
+/// Étape 6 : tokens consommés par l'appel, extraits du champ `usage` de la
+/// réponse du fournisseur (format OpenAI). Vide (tout à 0) si non
+/// disponible — ex. réponses en streaming zero-copy, où l'extraction
+/// nécessiterait de bufferiser (cf. commentaire dans `passthrough`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn is_empty(&self) -> bool {
+        self.total_tokens == 0
+    }
+}
+
 /// Une "Unité" d'observabilité : la lecture structurée d'un appel LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniteRecord {
@@ -60,6 +77,13 @@ pub struct UniteRecord {
     /// Catégories détectées (ex. "EMAIL", "SECRET_API") — vide si
     /// `pii_masked` est faux.
     pub pii_categories: Vec<String>,
+
+    /// Étape 6 : clé API virtuelle authentifiée pour cet appel (valeur
+    /// brute de la clé — ce champ n'est JAMAIS exposé tel quel par les
+    /// endpoints d'admin, toujours masqué avant affichage). `None` si
+    /// aucune clé virtuelle n'est configurée ou requise.
+    pub virtual_key: Option<String>,
+    pub tokens: TokenUsage,
 }
 
 pub fn now_unix_ms() -> u128 {
@@ -165,7 +189,9 @@ async fn export_otlp(
                         { "key": "http.target", "value": { "stringValue": record.logs.path.clone() } },
                         { "key": "http.status_code", "value": { "intValue": record.logs.status.to_string() } },
                         { "key": "proxyllm.pii_masked", "value": { "boolValue": record.pii_masked } },
-                        { "key": "proxyllm.pii_categories", "value": { "stringValue": record.pii_categories.join(",") } }
+                        { "key": "proxyllm.pii_categories", "value": { "stringValue": record.pii_categories.join(",") } },
+                        { "key": "proxyllm.virtual_key_used", "value": { "boolValue": record.virtual_key.is_some() } },
+                        { "key": "proxyllm.tokens_total", "value": { "intValue": record.tokens.total_tokens.to_string() } }
                     ],
                     "status": { "code": status_code_otlp }
                 }]
