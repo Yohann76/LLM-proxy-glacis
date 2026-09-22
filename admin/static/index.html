@@ -63,18 +63,15 @@
        "dark") appliqués localement au site, qui est en thème sombre fixe. */
     .dashboard {
       --surface-1:      #171a21;
-      --surface-page:   #0f1115;
       --text-primary:   #f2f3f5;
       --text-secondary: #9aa2af;
       --text-muted:     #6d7480;
       --grid-line:      #262a33;
       --baseline:       #383e4a;
-      --border-hair:    rgba(255,255,255,0.08);
       --series-1:       #3987e5; /* bleu — volume / autorisé */
       --series-2:       #d95926; /* orange — fournisseur B */
       --series-3:       #199e70; /* aqua — fournisseur C */
       --status-good:    #0ca30c;
-      --status-warning: #fab219;
       --status-critical:#e66767; /* bloqué */
       padding: 0 2rem 2.5rem;
     }
@@ -176,7 +173,7 @@
     }
 
     .chart-bar { transition: opacity .1s ease; }
-    .chart-bar:hover, .chart-bar.hovered { opacity: .82; }
+    .chart-bar:hover { opacity: .82; }
     .axis-label { fill: var(--text-muted); font-size: 9px; font-family: system-ui, sans-serif; }
     .gridline { stroke: var(--grid-line); stroke-width: 1; }
     .baseline { stroke: var(--baseline); stroke-width: 1; }
